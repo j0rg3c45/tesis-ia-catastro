@@ -1,0 +1,84 @@
+# ===============================
+# ENTORNOS Y CONFIGURACIÓN
+# ===============================
+
+.env
+.env.*
+*.env
+.venv/
+venv/
+env/
+ENV/
+
+# ===============================
+# ARCHIVOS PYTHON
+# ===============================
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.swp
+.ipynb_checkpoints/
+
+# ===============================
+# JUPYTER
+# ===============================
+
+.ipynb_checkpoints
+
+# ===============================
+# DATOS SENSIBLES (MUY IMPORTANTE)
+# ===============================
+
+data/raw_pdfs/
+data/raw_text/
+data/structured/
+data/validation/
+
+*.pdf
+*.xlsx
+*.csv
+*.json
+
+# ===============================
+# MODELOS ENTRENADOS
+# ===============================
+
+models/
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.joblib
+*.pkl
+
+# ===============================
+# REPORTES GENERADOS
+# ===============================
+
+reports/
+*.html
+
+# ===============================
+# SISTEMA OPERATIVO
+# ===============================
+
+.DS_Store
+Thumbs.db
+
+# ===============================
+# VS CODE
+# ===============================
+
+.vscode/
+
+# ===============================
+# BUILD / CACHE
+# ===============================
+
+build/
+dist/
+*.egg-info/
