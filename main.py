@@ -75,11 +75,14 @@ CONFIG = {
 # Ruta de entrada: carpeta con los PDFs
 BASE_FOLDER_PATH = r"C:\Users\Jorge\Desktop\repositorio_Git_Hub\tesis-ia-catastro\data\raw_pdfs"
 
-# Ruta de salida: carpeta donde se guardarán los textos extraídos
+# Ruta de salida: carpeta donde se guardarán los textos extraídos (raw)
 OUTPUT_FOLDER_PATH = r"C:\Users\Jorge\Desktop\repositorio_Git_Hub\tesis-ia-catastro\data\raw_text"
 
-# Ruta del archivo Excel de salida (opcional, si quieres mantenerlo también)
-OUTPUT_EXCEL_PATH = r"C:\Users\Jorge\Desktop\repositorio_Git_Hub\tesis-ia-catastro\data\raw_text\TABULADO_RESULTADOS.xlsx"
+# Ruta de salida: carpeta donde se guardará el Excel estructurado
+STRUCTURED_FOLDER_PATH = r"C:\Users\Jorge\Desktop\repositorio_Git_Hub\tesis-ia-catastro\data\structured"
+
+# Nombre del archivo Excel de salida
+OUTPUT_EXCEL_NAME = "TABULADO_RESULTADOS.xlsx"
 
 # --- CONFIGURACIÓN DE TESSERACT ---
 # Especificar la ruta completa de Tesseract en tu PC
@@ -355,7 +358,7 @@ def process_pdf(file_path, keywords, char_counts, nlp, cache_folder, base_folder
             except Exception as e:
                 logger.error(f"Error extrayendo texto de la página {i+1} de {filename}: {e}")
         
-        # --- Guardar texto extraído en la carpeta de salida ---
+        # --- Guardar texto extraído en la carpeta de salida (raw_text) ---
         # Crear nombre de archivo de salida (mismo nombre pero extensión .txt)
         output_filename = os.path.splitext(filename)[0] + ".txt"
         output_file_path = os.path.join(output_folder, output_filename)
@@ -415,9 +418,14 @@ def process_pdf(file_path, keywords, char_counts, nlp, cache_folder, base_folder
         logger.error(f"Error procesando el archivo {file_path}: {e}")
         return None
 
-def process_pdfs_in_folder(base_folder_path, output_folder_path, keywords, char_counts, output_excel):
-    # Crear carpeta de salida si no existe
+def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_folder_path, 
+                            output_excel_name, keywords, char_counts):
+    # Crear carpetas de salida si no existen
     os.makedirs(output_folder_path, exist_ok=True)
+    os.makedirs(structured_folder_path, exist_ok=True)
+    
+    # Ruta completa del archivo Excel
+    output_excel = os.path.join(structured_folder_path, output_excel_name)
     
     cache_folder = setup_cache_folder(base_folder_path)
     
@@ -469,6 +477,8 @@ if __name__ == "__main__":
     # Usar las rutas configuradas al inicio del archivo
     base_folder_path = BASE_FOLDER_PATH
     output_folder_path = OUTPUT_FOLDER_PATH
+    structured_folder_path = STRUCTURED_FOLDER_PATH
+    output_excel_name = OUTPUT_EXCEL_NAME
     
     keywords = ["RESOLUCIÓN No.", "FechaResolucion", "Número de matrícula inmobiliaria:", "Número predial:", 
                 "Número Predial Nacional:", "Código Homologado:", "Municipio:", "Propietario:", 
@@ -476,6 +486,5 @@ if __name__ == "__main__":
                 "Destinación economica:", "Avalúo:", "Fecha de la inscripción Catastral:", "Vigencia Fiscal:"]
     char_counts = [36, 24, 11, 21, 32, 13, 12, 850, 850, 260, 10, 10, 30, 14, 12, 12] 
     
-    output_excel = OUTPUT_EXCEL_PATH
-    
-    process_pdfs_in_folder(base_folder_path, output_folder_path, keywords, char_counts, output_excel)
+    process_pdfs_in_folder(base_folder_path, output_folder_path, structured_folder_path, 
+                          output_excel_name, keywords, char_counts)
