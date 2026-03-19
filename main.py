@@ -15,15 +15,15 @@ Autor: Proyecto de Tesis - Maestría en IA y Ciencia de Datos
 
 
 # ==============================================================================
-# SCRIPT FINAL Y ROBUSTO PARA EXTRACCIÓN DE DATOS DE PDF USANDO PaddleOCR
+# SCRIPT FINAL Y ROBUSTO PARA EXTRACCIÓN DE DATOS DE PDF USANDO Tesseract OCR
 # ==============================================================================
 #
 # Cómo usar este código:
 # 1. Instala las dependencias necesarias:
-#    pip install paddlepaddle paddleocr pdf2image openpyxl tqdm spacy opencv-python-headless
+#    pip install pytesseract pdf2image openpyxl tqdm spacy opencv-python-headless Pillow
 #    python -m spacy download es_core_news_sm
 #
-# 2. Asegúrate de tener Poppler instalado para pdf2image.
+# 2. Asegúrate de tener Tesseract OCR instalado y Poppler para pdf2image.
 #
 # 3. Ejecuta este script. Los resultados se guardarán en el archivo Excel especificado.
 #
@@ -47,12 +47,8 @@ from functools import partial
 import logging
 import gc
 
-# --- CAMBIO PRINCIPAL: Importar PaddleOCR en lugar de pytesseract ---
-from paddleocr import PaddleOCR
-
-# Configurar logging para ver el progreso y errores
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# --- IMPORTACIÓN DE Tesseract OCR ---
+import pytesseract
 
 # ==============================================================================
 # CONFIGURACIÓN PRINCIPAL
@@ -63,15 +59,35 @@ CONFIG = {
     "batch_size": 1,
     "cache_enabled": True,
     
-    # --- CONFIGURACIÓN DE PaddleOCR ---
-    "paddleocr_use_textline_orientation": True,
-    "paddleocr_lang": 'es',
+    # --- CONFIGURACIÓN DE Tesseract ---
+    "tesseract_lang": 'spa',  # Español
+    "tesseract_config": '--psm 6',  # Modo de segmentación de página
     
     # --- OPCIÓN DE DEPURACIÓN ---
-    # True = usa el preprocesamiento que funcionaba con Tesseract (denoise, sharpen, otsu).
+    # True = usa el preprocesamiento agresivo (denoise, sharpen, otsu).
     # False = usa un preprocesamiento más simple (solo escala de grises).
     "use_aggressive_preprocessing": True,
 }
+
+# ==============================================================================
+# RUTAS CONFIGURABLES
+# ==============================================================================
+# Ruta de entrada: carpeta con los PDFs
+BASE_FOLDER_PATH = r"C:\Users\Jorge\Desktop\repositorio_Git_Hub\tesis-ia-catastro\data\raw_pdfs"
+
+# Ruta de salida: carpeta donde se guardarán los textos extraídos
+OUTPUT_FOLDER_PATH = r"C:\Users\Jorge\Desktop\repositorio_Git_Hub\tesis-ia-catastro\data\raw_text"
+
+# Ruta del archivo Excel de salida (opcional, si quieres mantenerlo también)
+OUTPUT_EXCEL_PATH = r"C:\Users\Jorge\Desktop\repositorio_Git_Hub\tesis-ia-catastro\data\raw_text\TABULADO_RESULTADOS.xlsx"
+
+# --- CONFIGURACIÓN DE TESSERACT ---
+# Especificar la ruta completa de Tesseract en tu PC
+pytesseract.pytesseract.tesseract_cmd = r'C:\Users\Jorge\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+
+# Configurar logging para ver el progreso y errores
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # ==============================================================================
 # FUNCIONES AUXILIARES (CACHÉ Y HASH)
@@ -133,7 +149,7 @@ def preprocess_image(image):
     gray = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2GRAY)
 
     if CONFIG["use_aggressive_preprocessing"]:
-        # Modo agresivo (el que funcionaba con Tesseract)
+        # Modo agresivo (denoise, sharpen, otsu)
         denoised = cv2.fastNlMeansDenoising(gray, None, 30, 7, 21)
         sharpen_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
         sharpened = cv2.filter2D(denoised, -1, sharpen_kernel)
@@ -143,11 +159,9 @@ def preprocess_image(image):
         # Modo simple (solo escala de grises)
         return gray
 
-# --- FUNCIÓN CORREGIDA ---
-def extract_text_from_image(image, ocr_engine, page_num):
+def extract_text_from_image(image, page_num):
     """
-    Extrae texto de la imagen usando PaddleOCR.
-    VERSIÓN ULTRA-ROBUSTA CON MENSAJES DE DEPURACIÓN CORREGIDOS.
+    Extrae texto de la imagen usando Tesseract OCR.
     """
     processed_image = preprocess_image(image)
     
@@ -155,29 +169,20 @@ def extract_text_from_image(image, ocr_engine, page_num):
         logger.warning(f"Página {page_num} en blanco detectada, omitiendo OCR.")
         return ""
 
-    # --- CORRECCIÓN CLAVE: Inicializar 'result' antes del try ---
-    result = None
     try:
-        result = ocr_engine.ocr(processed_image)
-        full_text = ""
+        # Convertir de numpy array a PIL Image para Tesseract
+        pil_image = Image.fromarray(processed_image)
         
-        # --- VERIFICACIÓN ULTRA-ROBUSTA ---
-        if isinstance(result, tuple):
-            result = list(result)
-
-        if isinstance(result, list) and len(result) > 0:
-            first_level = result[0]
-            if isinstance(first_level, list):
-                for line in first_level:
-                    if isinstance(line, list) and len(line) >= 2 and isinstance(line[1], list) and len(line[1]) > 0:
-                        text = line[1][0]
-                        full_text += text + "\n"
+        # Extraer texto con Tesseract
+        text = pytesseract.image_to_string(
+            pil_image, 
+            lang=CONFIG["tesseract_lang"],
+            config=CONFIG["tesseract_config"]
+        )
         
-        return full_text.strip()
+        return text.strip()
     except Exception as e:
-        # --- MENSAJE DE DEPURACIÓN CORREGIDO ---
-        logger.error(f"Error en PaddleOCR en la página {page_num}: {e}")
-        logger.error(f"Resultado de PaddleOCR que causó el error: {result}")
+        logger.error(f"Error en Tesseract OCR en la página {page_num}: {e}")
         return ""
 
 # ==============================================================================
@@ -313,28 +318,22 @@ def count_NPNs(npn_text):
 # FUNCIONES DE ORQUESTACIÓN (PROCESAMIENTO PARALELO)
 # ==============================================================================
 
-logger.info("Inicializando motor PaddleOCR global...")
+logger.info("Verificando instalación de Tesseract OCR...")
 try:
-    ocr_engine_global = PaddleOCR(
-        use_textline_orientation=CONFIG["paddleocr_use_textline_orientation"], 
-        lang=CONFIG["paddleocr_lang"]
-    )
-    logger.info("Motor PaddleOCR global inicializado y listo.")
+    # Verificar que Tesseract esté accesible
+    version = pytesseract.get_tesseract_version()
+    logger.info(f"Tesseract OCR versión {version} detectado y listo.")
 except Exception as e:
-    logger.error(f"Error CRÍTICO al inicializar PaddleOCR global: {e}")
-    ocr_engine_global = None
+    logger.error(f"Error: No se pudo acceder a Tesseract OCR. Verifica la ruta: {e}")
+    raise
 
-def process_pdf(file_path, keywords, char_counts, nlp, cache_folder, ocr_engine, base_folder):
+def process_pdf(file_path, keywords, char_counts, nlp, cache_folder, base_folder, output_folder):
     try:
         filename = os.path.basename(file_path)
         logger.info(f"Iniciando procesamiento del archivo: {filename}")
         
         if is_file_processed(file_path, cache_folder):
             logger.info(f"Archivo {filename} ya procesado, omitiendo...")
-            return None
-        
-        if not ocr_engine:
-            logger.error(f"Motor OCR no disponible para procesar {filename}")
             return None
         
         images = pdf_to_images(file_path)
@@ -347,7 +346,7 @@ def process_pdf(file_path, keywords, char_counts, nlp, cache_folder, ocr_engine,
         
         for i, image in enumerate(images):
             try:
-                page_text = extract_text_from_image(image, ocr_engine, i + 1)
+                page_text = extract_text_from_image(image, i + 1)
                 if page_text:
                     text += page_text + "\n"
                 if (i + 1) % 5 == 0:
@@ -356,11 +355,15 @@ def process_pdf(file_path, keywords, char_counts, nlp, cache_folder, ocr_engine,
             except Exception as e:
                 logger.error(f"Error extrayendo texto de la página {i+1} de {filename}: {e}")
         
-        debug_text_folder = os.path.join(base_folder, "debug_texts")
-        os.makedirs(debug_text_folder, exist_ok=True)
-        with open(os.path.join(debug_text_folder, f"{filename}.txt"), "w", encoding="utf-8") as f:
+        # --- Guardar texto extraído en la carpeta de salida ---
+        # Crear nombre de archivo de salida (mismo nombre pero extensión .txt)
+        output_filename = os.path.splitext(filename)[0] + ".txt"
+        output_file_path = os.path.join(output_folder, output_filename)
+        
+        # Guardar el texto extraído
+        with open(output_file_path, "w", encoding="utf-8") as f:
             f.write(text)
-        logger.info(f"Texto de depuración guardado para {filename}.")
+        logger.info(f"Texto extraído guardado en: {output_file_path}")
 
         if not text.strip():
             logger.error(f"El texto extraído para {filename} está completamente vacío.")
@@ -412,7 +415,10 @@ def process_pdf(file_path, keywords, char_counts, nlp, cache_folder, ocr_engine,
         logger.error(f"Error procesando el archivo {file_path}: {e}")
         return None
 
-def process_pdfs_in_folder(base_folder_path, keywords, char_counts, output_excel):
+def process_pdfs_in_folder(base_folder_path, output_folder_path, keywords, char_counts, output_excel):
+    # Crear carpeta de salida si no existe
+    os.makedirs(output_folder_path, exist_ok=True)
+    
     cache_folder = setup_cache_folder(base_folder_path)
     
     workbook = Workbook()
@@ -431,7 +437,9 @@ def process_pdfs_in_folder(base_folder_path, keywords, char_counts, output_excel
     logger.info(f"Se encontraron {len(pdf_files)} archivos PDF para procesar con {CONFIG['max_workers']} workers (hilos).")
     
     with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
-        process_func = partial(process_pdf, keywords=keywords, char_counts=char_counts, nlp=nlp, cache_folder=cache_folder, ocr_engine=ocr_engine_global, base_folder=base_folder_path)
+        process_func = partial(process_pdf, keywords=keywords, char_counts=char_counts, nlp=nlp, 
+                              cache_folder=cache_folder, 
+                              base_folder=base_folder_path, output_folder=output_folder_path)
         
         futures = {executor.submit(process_func, pdf_file): pdf_file for pdf_file in pdf_files}
         
@@ -451,18 +459,23 @@ def process_pdfs_in_folder(base_folder_path, keywords, char_counts, output_excel
     
     workbook.save(output_excel)
     logger.info(f"Proceso completado. Datos guardados en {output_excel}")
+    logger.info(f"Textos extraídos guardados en: {output_folder_path}")
 
 # ==============================================================================
 # BLOQUE PRINCIPAL DE EJECUCIÓN
 # ==============================================================================
 
 if __name__ == "__main__":
-    base_folder_path = "C:\\Users\\Jorge\\Desktop\\20251031_ANSERMANUEVO"
+    # Usar las rutas configuradas al inicio del archivo
+    base_folder_path = BASE_FOLDER_PATH
+    output_folder_path = OUTPUT_FOLDER_PATH
+    
     keywords = ["RESOLUCIÓN No.", "FechaResolucion", "Número de matrícula inmobiliaria:", "Número predial:", 
                 "Número Predial Nacional:", "Código Homologado:", "Municipio:", "Propietario:", 
                 "Documento de identificación:", "Dirección:", "Área predio:", "Área construida:", 
                 "Destinación economica:", "Avalúo:", "Fecha de la inscripción Catastral:", "Vigencia Fiscal:"]
     char_counts = [36, 24, 11, 21, 32, 13, 12, 850, 850, 260, 10, 10, 30, 14, 12, 12] 
-    output_excel = "C:\\Users\\Jorge\\Desktop\\20251031_ANSERMANUEVO\\TABULADO_76041.xlsx"
     
-    process_pdfs_in_folder(base_folder_path, keywords, char_counts, output_excel)
+    output_excel = OUTPUT_EXCEL_PATH
+    
+    process_pdfs_in_folder(base_folder_path, output_folder_path, keywords, char_counts, output_excel)
