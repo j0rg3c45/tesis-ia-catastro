@@ -46,7 +46,7 @@ import time
 from functools import partial
 import logging
 import gc
-
+import shutil
 # --- IMPORTACIÓN DE Tesseract OCR ---
 import pytesseract
 
@@ -89,7 +89,14 @@ OUTPUT_EXCEL_NAME = "TABULADO_RESULTADOS.xlsx"
 pytesseract.pytesseract.tesseract_cmd = r'C:\Users\Jorge\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
 
 # Configurar logging para ver el progreso y errores
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.DEBUG,  # Cambiar a INFO después de depurar
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("catastro_debug.log", encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
@@ -100,14 +107,12 @@ def setup_cache_folder(base_folder):
     cache_folder = os.path.join(base_folder, ".cache")
     os.makedirs(cache_folder, exist_ok=True)
     return cache_folder
-
 def get_file_hash(file_path):
     hash_md5 = hashlib.md5()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
             hash_md5.update(chunk)
     return hash_md5.hexdigest()
-
 def is_file_processed(file_path, cache_folder):
     if not CONFIG["cache_enabled"]:
         return False
@@ -118,7 +123,6 @@ def is_file_processed(file_path, cache_folder):
             cache_data = json.load(f)
             return cache_data.get("completed", False)
     return False
-
 def mark_file_completed(file_path, cache_folder, data):
     if not CONFIG["cache_enabled"]:
         return
@@ -144,7 +148,6 @@ def pdf_to_images(pdf_path, dpi=None):
     except Exception as e:
         logger.error(f"Error al convertir PDF {pdf_path}: {e}")
         return []
-
 def preprocess_image(image):
     """
     Preprocesamiento con dos modos: agresivo y simple.
@@ -161,7 +164,6 @@ def preprocess_image(image):
     else:
         # Modo simple (solo escala de grises)
         return gray
-
 def extract_text_from_image(image, page_num):
     """
     Extrae texto de la imagen usando Tesseract OCR.
@@ -208,109 +210,239 @@ def extract_sections(text, section_starts, section_ends):
                 break
         return result
     return ""
-
 def extract_info_from_text(text, keywords, char_counts, nlp):
+    """
+    Extrae información de resoluciones catastrales con múltiples predios.
+    Diseñado para texto OCR de la Gobernación del Valle del Cauca.
+    """
+    logger.info(f" Iniciando extracción. Texto: {len(text)} caracteres")
     extracted_texts = []
-    doc = nlp(text)
+    
+    # Normalizar texto
     normalized_text = normalize_text(text)
     
-    for keyword, char_count in zip(keywords, char_counts):
+    # Log de diagnóstico (primeros 1000 caracteres)
+    logger.debug(f"Texto normalizado:\n{normalized_text[:1000]}...")
+    
+    for idx, (keyword, char_count) in enumerate(zip(keywords, char_counts)):
+        logger.debug(f"\n[{idx}] Procesando: '{keyword}'")
         found_values = []
         
+        # === RESOLUCIÓN (única por documento) ===
         if keyword == "RESOLUCIÓN No.":
-            pattern = re.compile(r'RESOLUCI[oÓ]N\s*No\.\s*([1-9]\d*(?:\.\d+)*\.?(?:[MZ][A-Z0-9-]{8})?)(?:-[A-Z0-9-]*)?', re.IGNORECASE)
+            # Buscar: RESOLUCION No. 1.120.50.03.01.M02-00342 DE 2025
+            pattern = re.compile(r'RESOLUCION\s+NO\.?\s*([0-9][0-9\.\-]*M[0-9]{2}\-[0-9]+)\s+DE\s+(\d{4})')
             match = pattern.search(normalized_text)
-            found_values.append(match.group(1).strip()[:char_count] if match else "NR")
+            if match:
+                valor = f"{match.group(1)} DE {match.group(2)}"
+                found_values.append(valor[:char_count])
+                logger.debug(f"   Resolución: {valor}")
+            else:
+                # Fallback más simple
+                pattern2 = re.compile(r'RESOLUCION\s+NO\.?\s*([^,\n]{5,30})')
+                match2 = pattern2.search(normalized_text)
+                found_values.append(match2.group(1).strip()[:char_count] if match2 else "NR")
         
         elif keyword == "FechaResolucion":
-            pattern = re.compile(r'(\d{1,2}\s+DE\s+[A-Z]+?\s+DE\s+\d{4})', re.IGNORECASE)
+            # Buscar: 16 de Diciembre de 2025 (varios formatos)
+            pattern = re.compile(r'(\d{1,2})\s+DE\s+([A-Z]+)\s+DE\s+(\d{4})')
             match = pattern.search(normalized_text)
-            found_values.append(match.group(1).strip()[:char_count] if match else "NR")
-
-        elif keyword == "Número de matrícula inmobiliaria:":
-            pattern = re.compile(r'Número\s+de\s+matr[ií]cula\s+inmobiliaria\s*[:\-–]?\s*([0-9\-]+)', re.IGNORECASE)
-            matches = pattern.findall(normalized_text)
-            if matches:
-                found_values.extend([match.strip()[:char_count] for match in matches])
+            if match:
+                valor = f"{match.group(1)} DE {match.group(2)} DE {match.group(3)}"
+                found_values.append(valor[:char_count])
+                logger.debug(f"   Fecha: {valor}")
             else:
                 found_values.append("NR")
+
+        # === CAMPOS QUE SE REPITEN POR PREDIO (múltiples valores) ===
+        elif keyword == "Número de matrícula inmobiliaria:":
+            # Buscar todos: 378-281007, 378-281008, etc.
+            pattern = re.compile(r'NUMERO\s+DE\s+MATRICULA\s+INMOBILIARIA\s*[:\-]?\s*(\d{3}\-\d{6})')
+            matches = pattern.findall(normalized_text)
+            found_values = [m[:char_count] for m in matches] if matches else ["NR"]
+            logger.debug(f"   Matrículas: {len(matches)} encontradas")
+
+        elif keyword == "Número predial:":
+            # Puede ser "No registra" o un número
+            pattern = re.compile(r'NUMERO\s+PREDIAL\s*[:\-]?\s*(NO\s+REGISTRA|\d[\d\-]*)')
+            matches = pattern.findall(normalized_text)
+            found_values = [m[:char_count] if m else "NR" for m in matches] if matches else ["NR"]
+            logger.debug(f"   Números prediales: {len(matches)} encontrados")
+
+        elif keyword == "Número Predial Nacional:":
+            # 20-24 dígitos típicamente
+            pattern = re.compile(r'NUMERO\s+PREDIAL\s+NACIONAL\s*[:\-]?\s*(\d{20,24})')
+            matches = pattern.findall(normalized_text)
+            found_values = [m[:char_count] for m in matches] if matches else ["NR"]
+            logger.debug(f"   NPNs: {len(matches)} encontrados")
+
+        elif keyword == "Código Homologado:":
+            # Formato: CCK000SUHZC, CCKOOOSUJAF (varía por OCR)
+            pattern = re.compile(r'CODIGO\s+HOMOLOGADO\s*[:\-]?\s*([A-Z]{2,3}\d{3,}[A-Z]{2,4})')
+            matches = pattern.findall(normalized_text)
+            found_values = [m[:char_count] for m in matches] if matches else ["NR"]
+            logger.debug(f"   Códigos: {len(matches)} encontrados")
+
+        elif keyword == "Municipio:":
+            pattern = re.compile(r'MUNICIPIO\s*[:\-]?\s*([A-Z]{3,20})(?=\s+PROPIETARIO|\n|$)')
+            matches = pattern.findall(normalized_text)
+            # Eliminar duplicados manteniendo orden
+            seen = set()
+            unique = []
+            for m in matches:
+                if m not in seen:
+                    seen.add(m)
+                    unique.append(m)
+            found_values = [m[:char_count] for m in unique] if unique else ["NR"]
+            logger.debug(f"   Municipios: {len(unique)} únicos")
 
         elif keyword == "Propietario:":
-            pattern = re.compile(r'(Propietarios?):\s*(.*?)\s*(Documentos? de identificación:|Dirección:|Número de matrícula inmobiliaria:|$)', re.DOTALL | re.IGNORECASE)
+            # DOS TIPOS de propietarios en tu texto:
+            # 1. MUNICIPIO DE CANDELARIA (simple)
+            # 2. FIDUCIARIA DAVIVIENDA S.A. COMO VOCERA Y ADMINISTRADORA DEL FIDEICOMISO BELORIZONTE (complejo)
+            pattern = re.compile(r'PROPIETARIO\s*[:\-]?\s*(.*?)(?=\s+DOCUMENTO|\s+MUNICIPIO|\n\s*DOCUMENTO)', re.DOTALL)
             matches = pattern.findall(normalized_text)
             if matches:
-                propietarios = [match[1].replace('\n', ' ').strip()[:char_count] for match in matches]
-                found_values.extend(propietarios)
-            else:
-                found_values.append("NR")
+                for m in matches:
+                    # Limpiar: eliminar "Documento de identificación" si se coló
+                    limpio = re.sub(r'DOCUMENTO.*', '', m, flags=re.IGNORECASE)
+                    limpio = re.sub(r'\s+', ' ', limpio).strip()
+                    if limpio and len(limpio) > 3:
+                        found_values.append(limpio[:char_count])
+            if not found_values:
+                found_values = ["NR"]
+            logger.debug(f"   Propietarios: {len(found_values)} encontrados")
 
         elif keyword == "Documento de identificación:":
-            pattern = re.compile(r'(Documentos? de identificación:)\s*(.*?)\s*(Dirección:|Número de matrícula inmobiliaria:|$)', re.DOTALL | re.IGNORECASE)
+            # Puede ser "No registra" o "N 8300537006"
+            pattern = re.compile(r'DOCUMENTO\s+DE\s+IDENTIFICACION\s*[:\-]?\s*(NO\s+REGISTRA|N?\s*\d[\d\.\-]*)')
             matches = pattern.findall(normalized_text)
-            if matches:
-                identificaciones = [match[1].replace('\n', ' ').strip()[:char_count] for match in matches]
-                found_values.extend(identificaciones)
-            else:
-                found_values.append("NR")
-        
-        elif keyword in ["Área predio:", "Área construida:"]:
-            area_pattern = re.compile(r'Área\s+(del\s+)?(Predio|Terreno):', re.IGNORECASE) if keyword == "Área predio:" else re.compile(r'Área\s+Construida:', re.IGNORECASE)
-            matches = area_pattern.finditer(normalized_text)
-            areas = []
-            for match in matches:
-                area_match = re.search(r'\s*(\d+[\d\s,.]*)', normalized_text[match.end():match.end() + 20])
-                if area_match:
-                    areas.append(area_match.group(1).strip().replace(',', '').replace(' ', '')[:char_count])
-            if areas:
-                found_values.extend(areas)
-            else:
-                found_values.append("NR")
+            found_values = []
+            for m in matches:
+                valor = m[0] if isinstance(m, tuple) else m
+                valor = re.sub(r'\s+', ' ', str(valor)).strip()
+                if valor:
+                    found_values.append(valor[:char_count])
+            if not found_values:
+                found_values = ["NR"]
+            logger.debug(f"   Documentos: {len(found_values)} encontrados")
 
-        elif keyword == "Fecha de la inscripción Catastral:":
-            pattern = re.compile(r'Fecha\s+de\s+la\s+inscripci[oóÓ]n\s+Catastral:\s*(\d{1,2}/\d{1,2}/\d{4})', re.IGNORECASE)
+        elif keyword == "Dirección:":
+            # UR BELORIZONTE C 21A, UR BELORIZONTE Mz F1, etc.
+            pattern = re.compile(r'DIRECCION\s*[:\-]?\s*(UR\s+[^\n]+?)(?=\s+AREA|\s+ÁREA|\n\s*AREA)', re.IGNORECASE | re.DOTALL)
             matches = pattern.findall(normalized_text)
-            if matches:
-                found_values.extend([match.strip()[:char_count] for match in matches])
-            else:
-                found_values.append("NR")
-        
-        elif keyword == "Vigencia Fiscal:":
-            pattern = re.compile(r'Vigencia\s+Fiscal:\s*(\d{1,2}/\d{1,2}/\d{4})', re.IGNORECASE)
+            found_values = []
+            for m in matches:
+                limpio = re.sub(r'\s+', ' ', str(m)).strip()
+                if len(limpio) > 5:
+                    found_values.append(limpio[:char_count])
+            if not found_values:
+                found_values = ["NR"]
+            logger.debug(f"   Direcciones: {len(found_values)} encontradas")
+
+        elif keyword == "Área predio:":
+            # 1845.84 m2, 1168.72 m2 - capturar número con decimales
+            pattern = re.compile(r'AREA\s+(?:DEL\s+)?(?:PREDIO|TERRENO)\s*[:\-]?\s*(\d{1,4}(?:[.,]\d{1,2})?)\s*(?:M2|M²|METROS|MTS)?', re.IGNORECASE)
             matches = pattern.findall(normalized_text)
-            if matches:
-                found_values.extend([match.strip()[:char_count] for match in matches])
-            else:
-                found_values.append("NR")
+            found_values = [m[0] if isinstance(m, tuple) else m for m in matches] if matches else ["NR"]
+            logger.debug(f"   Áreas predio: {len(matches)} encontradas")
+
+        elif keyword == "Área construida:":
+            pattern = re.compile(r'AREA\s+CONSTRUIDA\s*[:\-]?\s*(NO\s+REGISTRA|\d{1,4}(?:[.,]\d{1,2})?)\s*(?:M2|M²)?', re.IGNORECASE)
+            matches = pattern.findall(normalized_text)
+            found_values = []
+            for m in matches:
+                valor = m[0] if isinstance(m, tuple) else m
+                if valor:
+                    found_values.append(str(valor)[:char_count])
+            if not found_values:
+                found_values = ["NR"]
+            logger.debug(f"   Áreas construidas: {len(matches)} encontradas")
 
         elif keyword == "Destinación economica:":
-            pattern = re.compile(r'(Destinaci[oóÓ]n\s+econ[oóÓ]mica|Destino|Uso\s+econ[oóÓ]mico|Clasificaci[oóÓ]n\s+econ[oóÓ]mica):\s*(.*?)(?=\n|$)', re.IGNORECASE)
+            # "Lote urbanizado no construido"
+            pattern = re.compile(r'DESTINACION\s*[:\-]?\s*([A-Z\s]{10,40}?)(?=\n|AVALUO|$)', re.IGNORECASE)
             matches = pattern.findall(normalized_text)
-            if matches:
-                destinos = [match[1].strip()[:char_count] for match in matches]
-                found_values.extend(destinos)
-            else:
-                found_values.append("NR")
+            found_values = []
+            seen = set()
+            for m in matches:
+                limpio = re.sub(r'\s+', ' ', str(m)).strip()
+                if limpio and limpio not in seen and len(limpio) > 5:
+                    seen.add(limpio)
+                    found_values.append(limpio[:char_count])
+            if not found_values:
+                found_values = ["NR"]
+            logger.debug(f"   Destinaciones: {len(found_values)} encontradas")
+
+        elif keyword == "Avalúo:":
+            # $ 356,372,000 Vigencia... - capturar solo el monto inicial
+            pattern = re.compile(r'AVALUO\s*[:\-]?\s*\$?\s*([\d\.,]+)\s*(?:VIGENCIA|FECHA|$)', re.IGNORECASE)
+            matches = pattern.findall(normalized_text)
+            found_values = [m[:char_count] for m in matches] if matches else ["NR"]
+            logger.debug(f"   Avalúos: {len(matches)} encontrados")
+
+        elif keyword == "Fecha de la inscripción Catastral:":
+            # 18/06/2024 o 18/08/2024
+            pattern = re.compile(r'FECHA\s+DE\s+LA\s+INSCRIPCION\s+CATASTRAL\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4})')
+            matches = pattern.findall(normalized_text)
+            found_values = [m[:char_count] for m in matches] if matches else ["NR"]
+            logger.debug(f"  Fechas inscripción: {len(matches)} encontradas")
+        
+        elif keyword == "Vigencia Fiscal:":
+            # 01/01/2026
+            pattern = re.compile(r'VIGENCIA\s+FISCAL\s*[:\-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4})')
+            matches = pattern.findall(normalized_text)
+            found_values = [m[:char_count] for m in matches] if matches else ["NR"]
+            logger.debug(f"  Vigencias: {len(matches)} encontradas")
 
         else:
-            keyword_pattern = re.compile(re.escape(keyword) + r'\s*(.*?)(?=\n|$)', re.DOTALL | re.IGNORECASE)
-            matches = keyword_pattern.findall(normalized_text)
-            if matches:
-                found_values.extend([match.strip()[:char_count] for match in matches])
-            else:
-                found_values.append("NR")
+            # Fallback genérico
+            normalized_kw = normalize_text(keyword).rstrip(':')
+            pattern = re.compile(re.escape(normalized_kw) + r'\s*[:\-]?\s*(.*?)(?=\n|$)', re.DOTALL)
+            matches = pattern.findall(normalized_text)
+            found_values = [m.strip()[:char_count] for m in matches] if matches else ["NR"]
         
-        extracted_texts.append(' | '.join(found_values))
+        # Unir valores múltiples con separador
+        if found_values and found_values != ["NR"]:
+            resultado = ' | '.join(str(v) for v in found_values if v and v != "NR")
+        else:
+            resultado = "NR"
+        
+        extracted_texts.append(resultado)
+        logger.info(f"[{idx}] {keyword}: {resultado[:60]}{'...' if len(resultado) > 60 else ''}")
     
     return extracted_texts
-
 def normalize_text(text):
+    """
+    Normaliza texto OCR de documentos catastrales colombianos.
+    """
+    if not text:
+        return ""
+    
+    # Convertir a mayúsculas
     text = text.upper()
-    replacements = {'Ã': 'A', 'Í': 'I', 'Ó': 'O', 'Ú': 'U', 'É': 'E', 'Á': 'A', 'Ñ': 'N'}
+    
+    # Reemplazar caracteres de codificación corrupta comunes en OCR español
+    replacements = {
+        'Á': 'A', 'É': 'E', 'Í': 'I', 'Ó': 'O', 'Ú': 'U', 'Ü': 'U',
+        'À': 'A', 'È': 'E', 'Ì': 'I', 'Ò': 'O', 'Ù': 'U',
+        'Ñ': 'N', 'Ç': 'C',
+        'Ã': 'A',  # Codificación corrupta típica
+        ' ': ' ',   # Espacios irregulares
+        'º': 'O',  # Símbolo de ordinal masculino -> O
+        'ª': 'A',  # Símbolo de ordinal femenino -> A
+    }
+    
     for old, new in replacements.items():
         text = text.replace(old, new)
+    
+    # Normalizar espacios múltiples, tabs, saltos de línea
     text = re.sub(r'\s+', ' ', text)
-    return text
-
+    
+    # Normalizar guiones y separadores
+    text = text.replace('–', '-').replace('—', '-')
+    
+    return text.strip()
 def count_NPNs(npn_text):
     if npn_text and npn_text != "NR":
         unique_npns = set(npn_text.split('|'))
@@ -329,95 +461,65 @@ try:
 except Exception as e:
     logger.error(f"Error: No se pudo acceder a Tesseract OCR. Verifica la ruta: {e}")
     raise
-
-def process_pdf(file_path, keywords, char_counts, nlp, cache_folder, base_folder, output_folder):
+def process_pdf(file_path, keywords, char_counts, nlp, cache_folder, base_folder, output_folder, force_reprocess=False):
     try:
         filename = os.path.basename(file_path)
-        logger.info(f"Iniciando procesamiento del archivo: {filename}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"PROCESANDO: {filename}")
+        logger.info(f"{'='*60}")
         
-        if is_file_processed(file_path, cache_folder):
-            logger.info(f"Archivo {filename} ya procesado, omitiendo...")
+        if not force_reprocess and is_file_processed(file_path, cache_folder):
+            logger.info(f"⚠️ Ya en caché, omitiendo")
             return None
         
+        # OCR
         images = pdf_to_images(file_path)
         if not images:
-            logger.error(f"No se pudieron extraer imágenes del PDF {filename}")
+            logger.error(f" No se extrajeron imágenes")
             return None
         
-        logger.info(f"Se extrajeron {len(images)} imágenes de {filename}. Iniciando OCR...")
+        logger.info(f" {len(images)} páginas")
         text = ""
-        
         for i, image in enumerate(images):
-            try:
-                page_text = extract_text_from_image(image, i + 1)
-                if page_text:
-                    text += page_text + "\n"
-                if (i + 1) % 5 == 0:
-                    logger.info(f"Procesadas {i+1}/{len(images)} páginas de {filename}...")
-                    gc.collect()
-            except Exception as e:
-                logger.error(f"Error extrayendo texto de la página {i+1} de {filename}: {e}")
+            page_text = extract_text_from_image(image, i + 1)
+            if page_text:
+                text += page_text + "\n"
         
-        # --- Guardar texto extraído en la carpeta de salida (raw_text) ---
-        # Crear nombre de archivo de salida (mismo nombre pero extensión .txt)
-        output_filename = os.path.splitext(filename)[0] + ".txt"
-        output_file_path = os.path.join(output_folder, output_filename)
-        
-        # Guardar el texto extraído
+        # Guardar TXT
+        output_file_path = os.path.join(output_folder, os.path.splitext(filename)[0] + ".txt")
         with open(output_file_path, "w", encoding="utf-8") as f:
             f.write(text)
-        logger.info(f"Texto extraído guardado en: {output_file_path}")
-
-        if not text.strip():
-            logger.error(f"El texto extraído para {filename} está completamente vacío.")
-            return None
-
-        logger.info(f"OCR completado para {filename}. Extrayendo secciones...")
         
-        header_keywords = ["RESOLUCIÓN No.", "FechaResolucion"]
-        header_char_counts = [char_counts[keywords.index(k)] for k in header_keywords]
-        header_info = extract_info_from_text(text, header_keywords, header_char_counts, nlp)
-
-        resuelve_pattern = r"R\s*[E3][S5]\s*UE\s*LV\s*[E3]:?"
-        section_starts = [resuelve_pattern]
-        section_ends = ["NOTIFÍQUESE Y CÚMPLASE", "COMUNÍQUESE Y CÚMPLASE", "NOTIFÍQUESE", "COMUNÍQUESE"]
+        # Extraer datos
+        logger.info(f" Extrayendo datos estructurados...")
+        final_extracted_texts = extract_info_from_text(text, keywords, char_counts, nlp)
         
-        full_resuelve_block = extract_sections(text, section_starts, section_ends)
+        # Verificar extracción
+        campos_ok = sum(1 for f in final_extracted_texts if f != "NR")
+        logger.info(f"Campos extraídos: {campos_ok}/{len(keywords)}")
         
-        section_to_process = None
-        if not full_resuelve_block:
-            logger.warning(f"No se encontró la sección 'RESUELVE' en {filename}. Usando texto completo.")
-            section_to_process = text
-        else:
-            section_to_process = full_resuelve_block
-        
-        if not section_to_process:
-            logger.warning(f"No se pudo extraer ninguna sección procesable de {filename}")
-            return None
-        
-        property_keywords = [k for k in keywords if k not in header_keywords]
-        property_char_counts = [char_counts[keywords.index(k)] for k in property_keywords]
-        property_info = extract_info_from_text(section_to_process, property_keywords, property_char_counts, nlp)
-        
-        final_extracted_texts = header_info + property_info
-        
-        if all(field == "NR" for field in final_extracted_texts):
-            logger.warning(f"No se encontraron datos relevantes en {filename}")
-            return None
-        
-        npn_text = final_extracted_texts[keywords.index("Número Predial Nacional:")]
-        count_NPN = count_NPNs(npn_text)
+        # Calcular NPNs (contar cuántos hay separados por |)
+        try:
+            npn_index = keywords.index("Número Predial Nacional:")
+            npn_text = final_extracted_texts[npn_index]
+            count_NPN = len([x for x in npn_text.split('|') if x.strip() and x.strip() != "NR"])
+        except Exception as e:
+            logger.error(f"Error contando NPNs: {e}")
+            count_NPN = 0
         
         result = [filename] + final_extracted_texts + [count_NPN]
+        
+        # Guardar en caché
         mark_file_completed(file_path, cache_folder, result)
         
-        logger.info(f"Procesamiento completado para {filename}.")
+        logger.info(f"COMPLETADO: {filename} ({count_NPN} NPNs encontrados)")
         return result
-    
+        
     except Exception as e:
-        logger.error(f"Error procesando el archivo {file_path}: {e}")
+        logger.error(f" ERROR en {filename}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
-
 def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_folder_path, 
                             output_excel_name, keywords, char_counts):
     # Crear carpetas de salida si no existen
@@ -426,6 +528,27 @@ def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_fold
     
     # Ruta completa del archivo Excel
     output_excel = os.path.join(structured_folder_path, output_excel_name)
+    
+    # Agrega esto temporalmente al inicio de process_pdfs_in_folder
+    cache_folder = os.path.join(base_folder_path, ".cache")
+    if os.path.exists(cache_folder):
+        shutil.rmtree(cache_folder)
+        os.makedirs(cache_folder, exist_ok=True)
+        logger.info("Caché eliminado")
+
+    # === VERIFICAR SI EL EXCEL ESTÁ BLOQUEADO ===
+    if os.path.exists(output_excel):
+        try:
+            # Intentar abrir en modo append para verificar permisos
+            with open(output_excel, 'a'):
+                pass
+        except PermissionError:
+            logger.error(f"ERROR: El archivo Excel está abierto en otro programa: {output_excel}")
+            logger.error("   Cierra el archivo Excel y vuelve a ejecutar el script.")
+            # Crear nombre alternativo
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            output_excel = os.path.join(structured_folder_path, f"TABULADO_RESULTADOS_{timestamp}.xlsx")
+            logger.info(f"   Se creará archivo alternativo: {output_excel}")
     
     cache_folder = setup_cache_folder(base_folder_path)
     
@@ -444,14 +567,21 @@ def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_fold
     
     logger.info(f"Se encontraron {len(pdf_files)} archivos PDF para procesar con {CONFIG['max_workers']} workers (hilos).")
     
+    # === LIMPIAR CACHÉ SI SE REQUIERE PROCESAMIENTO FORZADO ===
+    force_reprocess = os.environ.get('FORCE_REPROCESS', 'false').lower() == 'true'
+    if force_reprocess:
+        logger.warning("MODO FORCE_REPROCESS: Se ignorará el caché y se reprocesarán todos los archivos.")
+    
     with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
         process_func = partial(process_pdf, keywords=keywords, char_counts=char_counts, nlp=nlp, 
                               cache_folder=cache_folder, 
-                              base_folder=base_folder_path, output_folder=output_folder_path)
+                              base_folder=base_folder_path, output_folder=output_folder_path,
+                              force_reprocess=force_reprocess)
         
         futures = {executor.submit(process_func, pdf_file): pdf_file for pdf_file in pdf_files}
         
         completed = 0
+        errors = 0
         for future in tqdm(as_completed(futures), total=len(pdf_files), desc="Procesando archivos PDF"):
             pdf_file = futures[future]
             try:
@@ -459,15 +589,63 @@ def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_fold
                 if result:
                     sheet.append(result)
                     completed += 1
-                    if completed % 10 == 0:
-                        workbook.save(output_excel)
-                        logger.info(f"Guardado parcial: {completed} archivos procesados.")
+                    # Guardar cada 5 archivos en lugar de 10 para no perder datos
+                    if completed % 5 == 0:
+                        try:
+                            workbook.save(output_excel)
+                            logger.info(f"Guardado parcial: {completed} archivos procesados.")
+                        except PermissionError:
+                            logger.error(f"No se pudo guardar - archivo Excel bloqueado. Continuando...")
+                            errors += 1
+                else:
+                    errors += 1
             except Exception as e:
                 logger.error(f"Error procesando {pdf_file}: {e}")
+                errors += 1
     
-    workbook.save(output_excel)
-    logger.info(f"Proceso completado. Datos guardados en {output_excel}")
-    logger.info(f"Textos extraídos guardados en: {output_folder_path}")
+    # === INTENTAR GUARDAR FINAL CON RETRY ===
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            workbook.save(output_excel)
+            logger.info(f"Proceso completado. Datos guardados en {output_excel}")
+            logger.info(f"Resumen: {completed} archivos procesados exitosamente, {errors} con errores.")
+            logger.info(f"Textos extraídos guardados en: {output_folder_path}")
+            break
+        except PermissionError as e:
+            if attempt < max_attempts - 1:
+                logger.warning(f" Intento {attempt + 1}/{max_attempts}: Excel bloqueado. Esperando 3 segundos...")
+                time.sleep(3)
+            else:
+                # Guardar con nombre alternativo
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                alt_path = os.path.join(structured_folder_path, f"TABULADO_RESULTADOS_{timestamp}.xlsx")
+                workbook.save(alt_path)
+                logger.error(f" No se pudo guardar en ubicación original después de {max_attempts} intentos.")
+                logger.info(f" Archivo guardado en ubicación alternativa: {alt_path}")
+        except Exception as e:
+            logger.error(f"Error inesperado guardando Excel: {e}")
+            break
+    with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
+        process_func = partial(
+            process_pdf, 
+            keywords=keywords, 
+            char_counts=char_counts, 
+            nlp=nlp, 
+            cache_folder=cache_folder, 
+            base_folder=base_folder_path, 
+            output_folder=output_folder_path,
+            force_reprocess=force_reprocess  #
+        )
+def clear_cache_for_file(file_path, cache_folder):
+    """Elimina la entrada de caché para un archivo específico"""
+    file_hash = get_file_hash(file_path)
+    cache_file = os.path.join(cache_folder, f"{file_hash}.json")
+    if os.path.exists(cache_file):
+        os.remove(cache_file)
+        logger.info(f"Caché eliminado para: {os.path.basename(file_path)}")
+        return True
+    return False
 
 # ==============================================================================
 # BLOQUE PRINCIPAL DE EJECUCIÓN
