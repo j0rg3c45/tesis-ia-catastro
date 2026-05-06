@@ -1,0 +1,235 @@
+================================================================================
+DIAGRAMA DE ARCHIVOS .PY - PROYECTO TESIS CATASTRO IA
+================================================================================
+Fecha: Mayo 2026
+Autor: Proyecto de Tesis - Maestría en IA y Ciencia de Datos
+================================================================================
+
+
+================================================================================
+ARQUITECTURA GENERAL DEL PROYECTO
+================================================================================
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                        ETAPA 1: EXTRACCIÓN                          │
+    │                          (main.py)                                  │
+    │                                                                     │
+    │   PDFs catastrales ──► OCR (Tesseract) ──► Regex ──► Excel         │
+    │   /data/raw_pdfs/       Preprocesamiento     Extracción de campos   │
+    │                         de imagen             estructurados          │
+    │                                                                     │
+    │   Salida: data/structured/TABULADO_RESULTADOS.xlsx                  │
+    └─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                     ETAPA 2: COMPARACIÓN                            │
+    │                  (scripts/comparar_bases.py)                         │
+    │                                                                     │
+    │   TABULADO_RESULTADOS.xlsx ──┐                                      │
+    │                              ├──► Cruce por NPN ──► Inconsistencias │
+    │   Base Catastral Oficial ────┘                                      │
+    │   (1_REGISTRO_R1_CONTRALORIA)                                       │
+    │                                                                     │
+    │   Salida: reports/reporte_comparacion_YYYYMMDD.xlsx                 │
+    └─────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │                     ETAPA 3: VISUALIZACIÓN                          │
+    │                      (dashboard/app.py)                              │
+    │                                                                     │
+    │   Reportes ──► Dashboard interactivo (pendiente de implementar)     │
+    └─────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+DETALLE POR ARCHIVO
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+main.py - ORQUESTADOR PRINCIPAL (ETAPA 1)
+────────────────────────────────────────────────────────────────────────────────
+
+Ubicación: /main.py
+Propósito:  Extracción de datos estructurados desde PDFs catastrales.
+
+¿Qué hace?
+  1. Recorre todos los PDFs en data/raw_pdfs/
+  2. Convierte cada página del PDF a imagen (pdf2image)
+  3. Preprocesa la imagen (OpenCV: escala de grises, denoise, sharpen, binarización)
+  4. Extrae texto con OCR (Tesseract en español)
+  5. Guarda el texto crudo en data/raw_text/
+  6. Aplica expresiones regulares (regex) para extraer 16 campos:
+     - Resolución, Fecha, Matrícula Inmobiliaria, Número Predial,
+       NPN, Código Homologado, Municipio, Propietario, Documento,
+       Dirección, Área Predio, Área Construida, Destinación,
+       Avalúo, Fecha Inscripción, Vigencia Fiscal
+  7. Guarda resultados en data/structured/TABULADO_RESULTADOS.xlsx
+
+Funciones principales:
+  - pdf_to_images()           → Convierte PDF a lista de imágenes
+  - preprocess_image()        → Preprocesa imagen para mejorar OCR
+  - extract_text_from_image() → Ejecuta Tesseract OCR
+  - normalize_text()          → Normaliza texto OCR (mayúsculas, acentos, espacios)
+  - extract_info_from_text()  → Extrae campos con regex (lógica principal)
+  - process_pdf()             → Orquesta el procesamiento de un PDF
+  - process_pdfs_in_folder()  → Procesa todos los PDFs en paralelo (ThreadPool)
+
+Dependencias: pytesseract, pdf2image, openpyxl, spacy, opencv, Pillow, tqdm
+
+Entrada:  data/raw_pdfs/*.pdf
+Salida:   data/raw_text/*.txt
+          data/structured/TABULADO_RESULTADOS.xlsx
+
+
+────────────────────────────────────────────────────────────────────────────────
+scripts/comparar_bases.py - COMPARADOR DE BASES (ETAPA 2)
+────────────────────────────────────────────────────────────────────────────────
+
+Ubicación: /scripts/comparar_bases.py
+Propósito:  Detectar inconsistencias entre los datos extraídos y la base
+            catastral oficial, cruzando por Número Predial Nacional (NPN).
+
+¿Qué hace?
+  1. Carga TABULADO_RESULTADOS.xlsx (resultados de la Etapa 1)
+  2. Expande NPNs múltiples (separados por |) en filas individuales
+  3. Carga la base catastral oficial (576,064 registros)
+  4. Normaliza los NPNs (solo dígitos) para hacer el cruce
+  5. Realiza un INNER JOIN por NPN_NORMALIZADO
+  6. Compara campo por campo los registros cruzados:
+     - Texto: comparación normalizada (mayúsculas, sin espacios extra)
+     - Números: comparación numérica (área, avalúo)
+     - Fechas: comparación de fechas normalizadas
+  7. Genera reporte Excel con 4 hojas:
+     - Resumen general
+     - Inconsistencias detalladas
+     - NPNs sin coincidencia
+     - Datos cruzados completos
+
+Funciones principales:
+  - cargar_tabulado()       → Carga y expande NPNs del tabulado
+  - cargar_base_catastral() → Carga la base oficial (576K registros)
+  - normalizar_npn()        → Limpia NPN a solo dígitos
+  - normalizar_texto()      → Normaliza texto para comparación
+  - normalizar_numero()     → Normaliza valores numéricos
+  - normalizar_fecha()      → Normaliza fechas a formato estándar
+  - realizar_cruce()        → Merge por NPN entre ambas bases
+  - comparar_campos()       → Detecta inconsistencias campo por campo
+  - generar_reporte()       → Crea Excel con resultados
+
+Dependencias: pandas, openpyxl, numpy
+
+Entrada:  data/structured/TABULADO_RESULTADOS.xlsx
+          data/structured/1_REGISTRO_R1_CONTRALORIA_20260501.xlsx
+Salida:   reports/reporte_comparacion_YYYYMMDD_HHMMSS.xlsx
+
+
+────────────────────────────────────────────────────────────────────────────────
+dashboard/app.py - DASHBOARD INTERACTIVO (ETAPA 3 - PENDIENTE)
+────────────────────────────────────────────────────────────────────────────────
+
+Ubicación: /dashboard/app.py
+Propósito:  Visualización interactiva de resultados y métricas.
+Estado:     Vacío (pendiente de implementar)
+
+
+────────────────────────────────────────────────────────────────────────────────
+src/ingestion/pdf_extractor.py - MÓDULO DE INGESTA (NO IMPLEMENTADO)
+────────────────────────────────────────────────────────────────────────────────
+
+Ubicación: /src/ingestion/pdf_extractor.py
+Propósito:  Módulo modular para extracción de PDFs (refactorización futura).
+Estado:     Vacío (la lógica actual está en main.py)
+
+
+────────────────────────────────────────────────────────────────────────────────
+src/reporting/report_generator.py - GENERADOR DE REPORTES (NO IMPLEMENTADO)
+────────────────────────────────────────────────────────────────────────────────
+
+Ubicación: /src/reporting/report_generator.py
+Propósito:  Módulo para generación de reportes estructurados.
+Estado:     Vacío (la lógica actual está en comparar_bases.py)
+
+
+────────────────────────────────────────────────────────────────────────────────
+src/utils/helpers.py - UTILIDADES (NO IMPLEMENTADO)
+────────────────────────────────────────────────────────────────────────────────
+
+Ubicación: /src/utils/helpers.py
+Propósito:  Funciones auxiliares compartidas entre módulos.
+Estado:     Vacío
+
+
+────────────────────────────────────────────────────────────────────────────────
+src/validation/validator.py - VALIDADOR (NO IMPLEMENTADO)
+────────────────────────────────────────────────────────────────────────────────
+
+Ubicación: /src/validation/validator.py
+Propósito:  Módulo de validación de datos extraídos.
+Estado:     Vacío
+
+
+================================================================================
+ESTRUCTURA DE CARPETAS
+================================================================================
+
+tesis-ia-catastro/
+│
+├── main.py                          ← Etapa 1: Extracción OCR + Regex
+├── scripts/
+│   └── comparar_bases.py            ← Etapa 2: Comparación por NPN
+│
+├── dashboard/
+│   └── app.py                       ← Etapa 3: Visualización (pendiente)
+│
+├── data/
+│   ├── raw_pdfs/                    ← PDFs de entrada (resoluciones)
+│   ├── raw_text/                    ← Texto OCR extraído
+│   ├── structured/
+│   │   ├── TABULADO_RESULTADOS.xlsx         ← Salida Etapa 1
+│   │   └── 1_REGISTRO_R1_CONTRALORIA_*.xlsx ← Base catastral oficial
+│   └── validation/                  ← (vacío)
+│
+├── reports/                         ← Reportes de comparación (Etapa 2)
+├── models/                          ← (vacío, se eliminó NER/BETO)
+├── src/                             ← Módulos futuros (vacíos)
+├── tests/                           ← Tests (vacío)
+│
+├── requirements.txt                 ← Dependencias del proyecto
+├── environment.yml                  ← Entorno Conda
+├── README.md                        ← Documentación general
+├── DIAGRAMA_ARCHIVOS.txt            ← Este archivo
+└── catastro_debug.log               ← Log de ejecución
+
+
+================================================================================
+FLUJO DE DATOS
+================================================================================
+
+  PDF (resolución catastral)
+       │
+       ▼
+  [main.py] ──► Imagen ──► OCR ──► Texto ──► Regex ──► Campos extraídos
+       │                                                       │
+       ▼                                                       ▼
+  data/raw_text/*.txt                          TABULADO_RESULTADOS.xlsx
+                                                               │
+                                                               ▼
+                                               [comparar_bases.py]
+                                                               │
+                                    ┌──────────────────────────┤
+                                    ▼                          ▼
+                          Base Catastral Oficial     Cruce por NPN
+                          (576,064 registros)              │
+                                                          ▼
+                                               Inconsistencias detectadas
+                                                          │
+                                                          ▼
+                                               reports/reporte_comparacion.xlsx
+
+
+================================================================================
+FIN DEL DIAGRAMA
+================================================================================
