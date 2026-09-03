@@ -92,3 +92,10 @@ dist/
 
 !data/structured/
 !data/structured/*.xlsx
+
+# ===============================
+# CARPETAS TEMPORALES DE PRUEBA
+# ===============================
+# Carpetas de validacion/prueba con datos personales; nunca se versionan.
+data/_prueba_*/
+data/_batch_test/

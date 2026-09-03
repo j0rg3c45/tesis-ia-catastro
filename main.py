@@ -91,6 +91,14 @@ STRUCTURED_FOLDER_PATH = os.path.join(DATA_DIR, "structured")
 # Nombre del archivo Excel de salida
 OUTPUT_EXCEL_NAME = "TABULADO_RESULTADOS.xlsx"
 
+# Tamaño de lote: número de PDFs que se procesan y se vuelcan al Excel antes de
+# pasar al siguiente lote. Mantiene acotado el uso de memoria y permite reanudar.
+# Configurable con la variable de entorno BATCH_SIZE (por defecto 100).
+try:
+    BATCH_SIZE = max(1, int(os.environ.get("BATCH_SIZE", "100")))
+except ValueError:
+    BATCH_SIZE = 100
+
 # --- CONFIGURACIÓN DE TESSERACT ---
 # Ruta al ejecutable de Tesseract. Se puede sobreescribir con la variable de
 # entorno TESSERACT_CMD. Si no se define y la ruta por defecto no existe, se
@@ -298,12 +306,18 @@ def segmentar_predios(texto_norm):
 
 def extraer_datos_documento(texto_norm):
     """Extrae los campos únicos por documento: número de resolución y fecha."""
+    # El numero de resolucion tiene formatos variados segun el corte, por ejemplo:
+    #   1.120.50.03.01.M02-00003 DE 2025
+    #   1.120.70.03.02,01.041.M01.1-00229 DE 2026   (con .N tras Mxx)
+    #   1.120.70.03.02.01.130.M02.1-00003 (27 DE FEBRERO...)  (sin " DE <ano>")
+    # Se tolera coma/punto como separador, sufijo opcional tras M[0-9]{2}, y el
+    # " DE <ano>" es opcional (algunos cortes lo omiten y siguen con la fecha).
     m = re.search(
-        r'RESOLUCION\s+NO\.?\s*([0-9][0-9\.,\-]*M[0-9]{2}\-[0-9]+)\s+DE\s+(\d{4})',
+        r'RESOLUCION\s+NO\.?\s*([0-9][0-9.,]*M[0-9]{2}(?:[.,][0-9]+)*\s*[\-][0-9]+)(?:\s+DE\s+(\d{4}))?',
         texto_norm, re.IGNORECASE)
     if m:
-        num = m.group(1).replace(',', '.')  # OCR a veces pone coma por punto
-        resolucion = f"{num} DE {m.group(2)}"
+        num = re.sub(r'\s+', '', m.group(1)).replace(',', '.')  # normalizar separadores
+        resolucion = f"{num} DE {m.group(2)}" if m.group(2) else num
     else:
         resolucion = NR
 
@@ -343,9 +357,22 @@ def extraer_campos_predio(bloque):
             npn = cand
     campos["Número Predial Nacional:"] = npn
 
-    # Código Homologado: tolerante a confusión O/0 (alfanumérico de 9-13).
-    campos["Código Homologado:"] = _match(
-        r'CODIGO\s+HOMOLOGADO\s*[:\-;]?\s*([A-Z0-9]{9,13})', bloque)
+    # Código Homologado: muy tolerante a ruido de OCR. La etiqueta varia
+    # (HOMOLOGADO / HOMOLAGADO / HOMOLOGADAO) igual que el separador (: ; . :;),
+    # y el codigo puede traer un espacio interno espurio. Se capturan hasta 13
+    # caracteres alfanumericos permitiendo un espacio interno, que luego se quita.
+    # El codigo homologado real tiene 11 caracteres alfanumericos (p. ej.
+    # CCAN001LSXB). Se corta antes de DEPARTAMENTO/MUNICIPIO y se toleran un
+    # espacio interno espurio y variantes de la etiqueta.
+    cod = _match(
+        r'C[OED]DIGO[.\s]*HOMOL[AO]*GAD[AO]*\s*[:\-;.]*\s*([A-Z0-9]{2,11}(?:\s[A-Z0-9]{1,4})?)',
+        bloque)
+    if cod != NR:
+        # El codigo real tiene 11 caracteres alfanumericos; se quita el espacio
+        # interno espurio del OCR y se trunca a 11 (descarta el DE/DEPARTAMENTO
+        # que a veces queda pegado).
+        cod = re.sub(r'\s+', '', cod)[:11]
+    campos["Código Homologado:"] = cod
 
     # Municipio: corta en PROPIETARIO/DEPARTAMENTO tolerando ruido intermedio.
     muni = _match(
@@ -363,10 +390,15 @@ def extraer_campos_predio(bloque):
         prop = prop[:160]
     campos["Propietario:"] = limpiar_texto_nombre(prop)
 
-    # Documento de identificación: 'NO REGISTRA' o tipo+número, corta en DIRECCION.
+    # Documento de identificación: 'NO REGISTRA' o tipo (N/C/NIT/CC) + número.
+    # El separador tras la etiqueta puede incluir un punto pegado por OCR
+    # (p. ej. "IDENTIFICACION:.C 1114786011"). Corta antes de DIRECCION.
+    # Documento: se captura directamente 'NO REGISTRA' o el tipo (N/C/NIT/CC)
+    # seguido del numero, sin depender de llegar hasta DIRECCION (entre el
+    # numero y DIRECCION suele haber ruido de OCR que rompia el lookahead).
     doc = _match(
-        r'DOCUMENTO\s+DE\s+IDENTIFICACION\s*[:\-;]?\s*(NO\s+REGISTRA|(?:N|C|NIT|CC)?\s*\d[\d\.\-\s;C]*?)(?=\s*DIRECCION|\s*$)',
-        bloque, flags=re.IGNORECASE | re.DOTALL)
+        r'DOCUMENTO\s+DE\s+IDENTIFICACION\s*[:\-;.\s]*(NO\s+REGISTRA|(?:NIT|CC|N|C)\s*\d[\d.\-]*|\d[\d.\-]+)',
+        bloque, flags=re.IGNORECASE)
     campos["Documento de identificación:"] = limpiar_valor(doc)
 
     # Dirección: corta antes de ÁREA.
@@ -397,11 +429,17 @@ def extraer_campos_predio(bloque):
     # Avalúo: primer monto (el más reciente suele ir primero).
     campos["Avalúo:"] = _match(r'AVALUO\s*[:\-;]?\s*\$?\s*([\d.,]+)', bloque)
 
+    # Fecha de inscripción catastral: la etiqueta "DE LA" es opcional segun el
+    # corte. Se exige una fecha real (dd/mm/yyyy), lo que evita capturar las
+    # menciones sin fecha de los considerandos legales.
     campos["Fecha de la inscripción Catastral:"] = _match(
-        r'FECHA\s+DE\s+LA\s+INSCRIPCION\s+CATASTRAL\s*[:\-;]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})', bloque)
+        r'FECHA\s+DE\s+(?:LA\s+)?INSCRIPCION\s+CATASTRAL\s*[:\-;]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})', bloque)
 
+    # Vigencia fiscal: en algunos cortes aparece como "VIGENCIA FISCAL: dd/mm/yyyy"
+    # y en otros solo "VIGENCIA dd/mm/yyyy" (pegada tras el avaluo). Se acepta
+    # "FISCAL" y el separador como opcionales.
     campos["Vigencia Fiscal:"] = _match(
-        r'VIGENCIA\s+FISCAL\s*[:\-;]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})', bloque)
+        r'VIGENCIA\s*(?:FISCAL)?\s*[:\-;]?\s*(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})', bloque)
 
     return campos
 
@@ -535,6 +573,40 @@ def process_pdf(file_path, cache_folder, base_folder, output_folder, force_repro
         import traceback
         logger.error(traceback.format_exc())
         return None
+
+
+def guardar_workbook(workbook, output_excel, structured_folder_path, max_attempts=3):
+    """
+    Guarda el workbook con reintentos si el Excel está bloqueado (abierto en
+    otro programa). Si tras los reintentos sigue bloqueado, guarda con un
+    nombre alternativo con marca de tiempo. Devuelve la ruta donde se guardó,
+    o None si no se pudo guardar.
+    """
+    for attempt in range(max_attempts):
+        try:
+            workbook.save(output_excel)
+            return output_excel
+        except PermissionError:
+            if attempt < max_attempts - 1:
+                logger.warning(f" Excel bloqueado. Reintentando en 3s ({attempt + 1}/{max_attempts})...")
+                time.sleep(3)
+            else:
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                alt_path = os.path.join(structured_folder_path, f"TABULADO_RESULTADOS_{timestamp}.xlsx")
+                try:
+                    workbook.save(alt_path)
+                    logger.error(f" No se pudo guardar en la ubicación original tras {max_attempts} intentos.")
+                    logger.info(f" Guardado en ubicación alternativa: {alt_path}")
+                    return alt_path
+                except Exception as e:
+                    logger.error(f"No se pudo guardar ni en la ubicación alternativa: {e}")
+                    return None
+        except Exception as e:
+            logger.error(f"Error inesperado guardando Excel: {e}")
+            return None
+    return None
+
+
 def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_folder_path,
                             output_excel_name):
     # Crear carpetas de salida si no existen
@@ -582,70 +654,70 @@ def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_fold
         for filename in files:
             if filename.endswith(".pdf"):
                 pdf_files.append(os.path.join(root, filename))
-    
-    logger.info(f"Se encontraron {len(pdf_files)} archivos PDF para procesar con {CONFIG['max_workers']} workers (hilos).")
 
-    with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
-        process_func = partial(process_pdf,
-                              cache_folder=cache_folder,
-                              base_folder=base_folder_path, output_folder=output_folder_path,
-                              force_reprocess=force_reprocess)
-        
-        futures = {executor.submit(process_func, pdf_file): pdf_file for pdf_file in pdf_files}
-        
-        completed = 0
-        errors = 0
-        total_predios = 0
-        for future in tqdm(as_completed(futures), total=len(pdf_files), desc="Procesando archivos PDF"):
-            pdf_file = futures[future]
-            try:
-                # result es una lista de filas (una por predio); None = error, [] = sin predios/caché
-                result = future.result()
-                if result:
-                    for fila in result:
-                        sheet.append(fila)
-                        total_predios += 1
-                    completed += 1
-                    # Guardar cada 5 archivos para no perder datos
-                    if completed % 5 == 0:
-                        try:
-                            workbook.save(output_excel)
-                            logger.info(f"Guardado parcial: {completed} archivos, {total_predios} predios.")
-                        except PermissionError:
-                            logger.error(f"No se pudo guardar - archivo Excel bloqueado. Continuando...")
-                            errors += 1
-                elif result is None:
+    total_pdfs = len(pdf_files)
+    # Trocear la lista en lotes de BATCH_SIZE
+    lotes = [pdf_files[i:i + BATCH_SIZE] for i in range(0, total_pdfs, BATCH_SIZE)]
+    logger.info(f"Se encontraron {total_pdfs} archivos PDF.")
+    logger.info(f"Se procesarán en {len(lotes)} lote(s) de hasta {BATCH_SIZE} PDF cada uno, "
+                f"con {CONFIG['max_workers']} workers (hilos).")
+
+    process_func = partial(process_pdf,
+                           cache_folder=cache_folder,
+                           base_folder=base_folder_path, output_folder=output_folder_path,
+                           force_reprocess=force_reprocess)
+
+    completed = 0
+    errors = 0
+    total_predios = 0
+
+    # === PROCESAMIENTO POR LOTES ===
+    # Cada lote se procesa en paralelo, sus filas se vuelcan al Excel y se guarda
+    # al terminar el lote. Esto acota la memoria, da progreso visible y, junto
+    # con el caché por hash, permite reanudar si el proceso se interrumpe.
+    for idx_lote, lote in enumerate(lotes, start=1):
+        logger.info(f"===== LOTE {idx_lote}/{len(lotes)} ({len(lote)} PDF) =====")
+        with ThreadPoolExecutor(max_workers=CONFIG["max_workers"]) as executor:
+            futures = {executor.submit(process_func, pdf_file): pdf_file for pdf_file in lote}
+            desc = f"Lote {idx_lote}/{len(lotes)}"
+            for future in tqdm(as_completed(futures), total=len(lote), desc=desc):
+                pdf_file = futures[future]
+                try:
+                    # result: lista de filas (una por predio); None = error; [] = sin predios/caché
+                    result = future.result()
+                    if result:
+                        for fila in result:
+                            sheet.append(fila)
+                            total_predios += 1
+                        completed += 1
+                    elif result is None:
+                        errors += 1
+                    else:
+                        completed += 1
+                except Exception as e:
+                    logger.error(f"Error procesando {pdf_file}: {e}")
                     errors += 1
-                else:
-                    # Lista vacía: archivo sin predios válidos o ya en caché
-                    completed += 1
-            except Exception as e:
-                logger.error(f"Error procesando {pdf_file}: {e}")
-                errors += 1
-    
-    # === INTENTAR GUARDAR FINAL CON RETRY ===
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        try:
-            workbook.save(output_excel)
-            logger.info(f"Proceso completado. Datos guardados en {output_excel}")
-            logger.info(f"Resumen: {completed} archivos procesados, {total_predios} predios tabulados, {errors} con errores.")
-            logger.info(f"Textos extraídos guardados en: {output_folder_path}")
-            break
-        except PermissionError as e:
-            if attempt < max_attempts - 1:
-                logger.warning(f" Intento {attempt + 1}/{max_attempts}: Excel bloqueado. Esperando 3 segundos...")
-                time.sleep(3)
-            else:
-                # Guardar con nombre alternativo
-                timestamp = time.strftime("%Y%m%d_%H%M%S")
-                alt_path = os.path.join(structured_folder_path, f"TABULADO_RESULTADOS_{timestamp}.xlsx")
-                workbook.save(alt_path)
-                logger.error(f" No se pudo guardar en ubicación original después de {max_attempts} intentos.")
-                logger.info(f" Archivo guardado en ubicación alternativa: {alt_path}")
-        except Exception as e:
-            logger.error(f"Error inesperado guardando Excel: {e}")
-            break
+
+        # Guardar al final de cada lote para no perder trabajo
+        guardado = guardar_workbook(workbook, output_excel, structured_folder_path)
+        if guardado:
+            output_excel = guardado  # por si cambió a nombre alternativo
+            logger.info(f"Lote {idx_lote}/{len(lotes)} guardado: "
+                        f"{completed} archivos, {total_predios} predios acumulados.")
+        else:
+            logger.error(f"No se pudo guardar el lote {idx_lote}. Continuando en memoria...")
+
+        gc.collect()
+
+    # === GUARDADO FINAL ===
+    guardado = guardar_workbook(workbook, output_excel, structured_folder_path)
+    if guardado:
+        output_excel = guardado
+        logger.info(f"Proceso completado. Datos guardados en {output_excel}")
+        logger.info(f"Resumen: {completed} archivos procesados, {total_predios} predios tabulados, {errors} con errores.")
+        logger.info(f"Textos extraídos guardados en: {output_folder_path}")
+    else:
+        logger.error("No se pudo realizar el guardado final del Excel.")
 
 
 def clear_cache_for_file(file_path, cache_folder):
