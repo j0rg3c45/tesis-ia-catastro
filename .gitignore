@@ -82,3 +82,13 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
+
+# ===============================
+# EXCEPCIONES: RESULTADOS ESTRUCTURADOS
+# ===============================
+# Se versionan los Excel de data/structured/ (base oficial y tabulado de
+# resultados). Los PDFs crudos, el texto OCR y validation/ siguen ignorados
+# por tamano y por contener datos personales.
+
+!data/structured/
+!data/structured/*.xlsx
