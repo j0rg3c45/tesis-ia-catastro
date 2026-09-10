@@ -288,6 +288,35 @@ def _match(patron, texto, grupo=1, flags=re.IGNORECASE):
     return NR
 
 
+# Correcciones OCR por posicion para el Codigo Homologado.
+# Estructura fija del codigo: 3 LETRAS + 4 DIGITOS + 4 LETRAS (ej. CCA0001LSXB).
+# El OCR confunde sistematicamente digitos con letras y viceversa; se corrige
+# segun la posicion esperada.
+_OCR_A_DIGITO = {'O': '0', 'Q': '0', 'D': '0', 'I': '1', 'L': '1', 'Z': '2',
+                 'S': '5', 'B': '8', 'G': '6', 'T': '7', 'A': '4'}
+_OCR_A_LETRA = {'0': 'O', '1': 'I', '5': 'S', '8': 'B', '6': 'G', '2': 'Z'}
+
+
+def corregir_codigo_homologado(cod):
+    """
+    Corrige confusiones de OCR en el Codigo Homologado usando su estructura
+    fija de 11 caracteres: posiciones 0-2 letras, 3-6 digitos, 7-10 letras.
+    Si el codigo no tiene 11 caracteres se devuelve tal cual (no se fuerza).
+    """
+    if not cod or len(cod) != 11:
+        return cod
+    chars = list(cod)
+    for i in range(len(chars)):
+        c = chars[i]
+        if 3 <= i <= 6:            # deben ser digitos
+            if not c.isdigit():
+                chars[i] = _OCR_A_DIGITO.get(c, c)
+        else:                       # deben ser letras (0-2 y 7-10)
+            if c.isdigit():
+                chars[i] = _OCR_A_LETRA.get(c, c)
+    return "".join(chars)
+
+
 def segmentar_predios(texto_norm):
     """
     Divide el texto normalizado en bloques, uno por predio.
@@ -368,10 +397,8 @@ def extraer_campos_predio(bloque):
         r'C[OED]DIGO[.\s]*HOMOL[AO]*GAD[AO]*\s*[:\-;.]*\s*([A-Z0-9]{2,11}(?:\s[A-Z0-9]{1,4})?)',
         bloque)
     if cod != NR:
-        # El codigo real tiene 11 caracteres alfanumericos; se quita el espacio
-        # interno espurio del OCR y se trunca a 11 (descarta el DE/DEPARTAMENTO
-        # que a veces queda pegado).
         cod = re.sub(r'\s+', '', cod)[:11]
+        cod = corregir_codigo_homologado(cod)
     campos["Código Homologado:"] = cod
 
     # Municipio: corta en PROPIETARIO/DEPARTAMENTO tolerando ruido intermedio.
@@ -382,10 +409,23 @@ def extraer_campos_predio(bloque):
         muni = _match(r'MUNICIPIO\s*[:\-;]?\s*([A-Z][A-Z ]{2,25})', bloque)
     campos["Municipio:"] = limpiar_texto_nombre(muni)
 
-    # Propietario: anclado a la ficha del predio, corta antes de DOCUMENTO.
-    prop = _match(
+    # Propietario: puede haber VARIAS apariciones de 'PROPIETARIO' en el bloque
+    # (una real de la ficha y otras contaminadas por pie de pagina/considerandos).
+    # Se elige la que va seguida de 'DOCUMENTO DE IDENTIFICACION' (la ficha real);
+    # si ninguna la tiene, se toma la primera que capture algo razonable.
+    prop = NR
+    candidatos = re.findall(
         r'PROPIETARIO\s*[:\-;]?\s*(.+?)(?=\s+DOCUMENTO\s+DE\s+IDENTIFICACION)',
         bloque, flags=re.IGNORECASE | re.DOTALL)
+    if candidatos:
+        prop = candidatos[0]
+    else:
+        # Fallback: cortar en marcadores de ruido conocidos (pie de pagina, direccion)
+        m = re.search(
+            r'PROPIETARIO\s*[:\-;]?\s*(.+?)(?=\s+DIRECCION|\s+CALL\s*CENTER|\s+PAGINA|\s*\||\n|$)',
+            bloque, flags=re.IGNORECASE)
+        if m:
+            prop = m.group(1)
     if prop != NR and len(prop) > 160:
         prop = prop[:160]
     campos["Propietario:"] = limpiar_texto_nombre(prop)

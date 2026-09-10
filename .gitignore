@@ -99,3 +99,23 @@ dist/
 # Carpetas de validacion/prueba con datos personales; nunca se versionan.
 data/_prueba_*/
 data/_batch_test/
+
+# ===============================
+# CONTEXTO CATASTRAL / TESIS
+# ===============================
+# Documentacion de referencia (modelos IGAC, PDFs, .tex de la tesis): son
+# insumos pesados, no codigo. Se ignoran salvo el diccionario de destinos,
+# que es dependencia real del pipeline de consolidacion.
+data/contexto_catastral/*
+!data/contexto_catastral/general_destinacion_economica.txt
+data/contexto_tesis/
+
+# ===============================
+# CARPETA DE COMPARACION
+# ===============================
+# Los datos consolidados y reportes de comparacion son artefactos generados y
+# pesados (base consolidada ~94MB, con datos personales). Se ignoran.
+data/comparacion/
+
+# Scripts temporales de diagnostico
+scripts/_*.py
