@@ -109,7 +109,24 @@ $env:LOG_LEVEL = "INFO"
 
 # Reprocesar todo ignorando el cache por hash
 $env:FORCE_REPROCESS = "true"
+
+# Tamano de lote de PDFs (guardado incremental). Por defecto 100
+$env:BATCH_SIZE = "100"
+
+# --- Parametros de OCR (afinados por experimento) ---
+# DPI del OCR. Por defecto 300 (equilibrio calidad/velocidad). Subir a 400
+# mejora un poco mas la lectura pero es mas lento.
+$env:OCR_DPI = "300"
+
+# Preprocesamiento agresivo (denoise+sharpen+Otsu). Por defecto false.
+# El experimento mostro que degrada el OCR en estos documentos; dejar en false.
+$env:OCR_AGGRESSIVE = "false"
 ```
+
+**Nota sobre calidad de OCR:** un experimento controlado sobre documentos
+reales determino que la mejor configuracion es **DPI 300 en escala de grises
+simple (sin preprocesamiento agresivo)**, que elevo la lectura del Codigo
+Homologado de ~31 % a ~86 %. Estos son los valores por defecto del sistema.
 
 ---
 
@@ -127,9 +144,19 @@ python scripts/comparar_pdf_vs_catastro.py
 ```
 
 Salidas:
-- `data/structured/TABULADO_RESULTADOS.xlsx` — tabulado de los PDFs
+- `data/structured/TABULADO_RESULTADOS.xlsx` — tabulado de los PDFs (1 fila por predio)
 - `data/comparacion/BASE_CATASTRAL_CONSOLIDADA_<corte>.csv` — base consolidada
-- `data/comparacion/COMPARACION_PDF_VS_CATASTRO_<timestamp>.xlsx` — reporte
+- `data/comparacion/COMPARACION_PDF_VS_CATASTRO_<timestamp>.xlsx` — reporte en Excel (4 hojas)
+- `data/comparacion/REPORTE_VALIDACION_<timestamp>.txt` — reporte de validacion en texto plano (Objetivo 4)
+
+### Nota para la corrida del lote completo (2.568 PDFs)
+
+- Colocar todos los PDFs en `data/raw_pdfs/` (se admiten subcarpetas; `os.walk` los recorre).
+- La Etapa 1 procesa por lotes de `BATCH_SIZE` y es **reanudable**: si se interrumpe,
+  al volver a ejecutar `python main.py` el cache por hash salta los ya procesados.
+- Con DPI 300 el proceso es mas lento que con 200, pero da mejor calidad. Se puede
+  dejar corriendo por horas; el guardado por lote evita perder trabajo.
+- Al terminar la Etapa 1, ejecutar la consolidacion (si cambio el corte) y la comparacion.
 
 ---
 

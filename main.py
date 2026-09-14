@@ -53,19 +53,28 @@ import pytesseract
 # CONFIGURACIÓN PRINCIPAL
 # ==============================================================================
 CONFIG = {
-    "dpi": 200,
+    # DPI del OCR. Un experimento controlado sobre documentos reales mostro que
+    # subir de 200 a 300 DPI mejora drasticamente la lectura del Codigo
+    # Homologado (de ~31% a ~86% de coincidencia), y 400 DPI llega a ~91% a
+    # costa de mayor tiempo. Se adopta 300 como equilibrio calidad/velocidad.
+    # Configurable con la variable de entorno OCR_DPI.
+    "dpi": int(os.environ.get("OCR_DPI", "300")),
     "max_workers": multiprocessing.cpu_count() // 2,
     "batch_size": 1,
     "cache_enabled": True,
-    
+
     # --- CONFIGURACIÓN DE Tesseract ---
     "tesseract_lang": 'spa',  # Español
     "tesseract_config": '--psm 6',  # Modo de segmentación de página
-    
-    # --- OPCIÓN DE DEPURACIÓN ---
-    # True = usa el preprocesamiento agresivo (denoise, sharpen, otsu).
-    # False = usa un preprocesamiento más simple (solo escala de grises).
-    "use_aggressive_preprocessing": True,
+
+    # --- PREPROCESAMIENTO DE IMAGEN ---
+    # IMPORTANTE: el experimento mostro que el preprocesamiento AGRESIVO
+    # (denoise + sharpen + binarizacion Otsu) DEGRADA el OCR en estos
+    # documentos (confunde digitos como el 6). El modo SIMPLE (solo escala de
+    # grises) da mejores resultados y ademas es mas rapido. Por eso se deja en
+    # False por defecto. Configurable con la variable de entorno
+    # OCR_AGGRESSIVE=true si se quisiera reactivar.
+    "use_aggressive_preprocessing": os.environ.get("OCR_AGGRESSIVE", "false").lower() == "true",
 }
 
 # ==============================================================================

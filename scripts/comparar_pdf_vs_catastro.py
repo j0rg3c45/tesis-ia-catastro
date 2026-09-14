@@ -121,20 +121,20 @@ def comparar_valor(tipo, val_pdf, val_base):
     if tipo == "numero":
         a, b = norm_numero(val_pdf), norm_numero(val_base)
         if a is None and b is None:
-            return "— sin datos", None
+            return "[-] sin datos", None
         if a is None or b is None:
-            return "⚠ dato faltante", None
+            return "[!] dato faltante", None
         if abs(a - b) < 0.01:
-            return "✓ coincide", True
-        return f"✗ difiere (Δ {abs(a-b):,.2f})", False
+            return "[OK] coincide", True
+        return f"[X] difiere (dif {abs(a-b):,.2f})", False
 
     if tipo == "fecha":
         a, b = norm_fecha(val_pdf), norm_fecha(val_base)
         if not a and not b:
-            return "— sin datos", None
+            return "[-] sin datos", None
         if not a or not b:
-            return "⚠ dato faltante", None
-        return ("✓ coincide", True) if a == b else ("✗ difiere", False)
+            return "[!] dato faltante", None
+        return ("[OK] coincide", True) if a == b else ("[X] difiere", False)
 
     if tipo == "propietario":
         # Comparacion insensible al orden y TOLERANTE a ruido de OCR.
@@ -173,9 +173,9 @@ def comparar_valor(tipo, val_pdf, val_base):
         A = lista_personas(val_pdf)
         B = lista_personas(val_base)
         if not A and not B:
-            return "— sin datos", None
+            return "[-] sin datos", None
         if not A or not B:
-            return "⚠ dato faltante", None
+            return "[!] dato faltante", None
 
         # Emparejar cada persona de A con alguna de B (match difuso por tokens)
         emparejados = 0
@@ -191,26 +191,26 @@ def comparar_valor(tipo, val_pdf, val_base):
 
         total = max(len(A), len(B))
         if emparejados == total:
-            return "✓ coincide", True
+            return "[OK] coincide", True
         if emparejados >= 1:
             # Coincidencia parcial: comparten al menos un propietario
             if emparejados == min(len(A), len(B)):
-                return "✓ coincide (subset)", True
-            return f"≈ parcial ({emparejados}/{total})", True
-        return "✗ difiere", False
+                return "[OK] coincide (subset)", True
+            return f"[~] parcial ({emparejados}/{total})", True
+        return "[X] difiere", False
 
     # texto y destino
     a, b = norm_texto(val_pdf), norm_texto(val_base)
     if not a and not b:
-        return "— sin datos", None
+        return "[-] sin datos", None
     if not a or not b:
-        return "⚠ dato faltante", None
+        return "[!] dato faltante", None
     if a == b:
-        return "✓ coincide", True
+        return "[OK] coincide", True
     # coincidencia parcial: uno contenido en el otro (util para nombres/direcciones)
     if a in b or b in a:
-        return "≈ parcial", True
-    return "✗ difiere", False
+        return "[~] parcial", True
+    return "[X] difiere", False
 
 
 # ------------------------------------------------------------------ carga
@@ -313,6 +313,110 @@ def construir_resumen(df_pdf, df_base, df_detalle, df_incons, df_sinmatch, stats
     return pd.DataFrame(resumen, columns=["Metrica", "Valor"])
 
 
+def generar_reporte_txt(ruta_txt, df_pdf, df_base, df_detalle, df_incons,
+                        df_sinmatch, stats, corte):
+    """
+    Genera el REPORTE DE VALIDACION en formato texto plano (.txt), conforme al
+    Objetivo Especifico 4: organiza los campos identificados, documenta las
+    inconsistencias detectadas y aporta informacion contextual para su
+    verificacion y correccion.
+
+    Estructura del archivo:
+      1. Encabezado y metadatos de la ejecucion
+      2. Resumen global del cruce
+      3. Concordancia por campo
+      4. Detalle de inconsistencias por predio (agrupado por NPN)
+      5. Predios sin correspondencia en la base catastral
+    """
+    total_pdf = df_pdf["_NPN"].nunique()
+    con_match = len(df_detalle)
+    sin_match = len(df_sinmatch)
+    W = 78  # ancho de linea
+
+    def linea(c="="):
+        return c * W
+
+    lineas = []
+    ap = lineas.append
+
+    # 1. ENCABEZADO
+    ap(linea("="))
+    ap("REPORTE DE VALIDACION DOCUMENTAL CATASTRAL".center(W))
+    ap("Contraste: resoluciones (PDF) vs base de datos catastral".center(W))
+    ap(linea("="))
+    ap(f"Fecha de generacion : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    ap(f"Corte base catastral: {corte}")
+    ap(f"Llave de cruce      : Numero Predial Nacional (NPN, 30 digitos)")
+    ap("")
+
+    # 2. RESUMEN GLOBAL
+    ap(linea("-"))
+    ap("1. RESUMEN GLOBAL")
+    ap(linea("-"))
+    pct_cruce = f"{100*con_match/total_pdf:.1f}%" if total_pdf else "0%"
+    ap(f"  Predios extraidos de PDF (NPN unicos) : {total_pdf}")
+    ap(f"  Predios en base catastral consolidada : {df_base['_NPN'].nunique()}")
+    ap(f"  Predios con correspondencia (cruce)   : {con_match} ({pct_cruce})")
+    ap(f"  Predios SIN correspondencia en base   : {sin_match}")
+    ap(f"  Total de campos inconsistentes        : {len(df_incons)}")
+    ap("")
+
+    # 3. CONCORDANCIA POR CAMPO
+    ap(linea("-"))
+    ap("2. CONCORDANCIA POR CAMPO (sobre predios con cruce)")
+    ap(linea("-"))
+    ap(f"  {'Campo':<26}{'Coincide':>10}{'Compara':>9}{'%':>6}{'Difiere':>9}{'Faltan':>8}")
+    for legible, _, _, _ in CAMPOS:
+        s = stats[legible]
+        comparables = s["coincide"] + s["difiere"]
+        pct = f"{100*s['coincide']/comparables:.0f}%" if comparables else "n/a"
+        ap(f"  {legible:<26}{s['coincide']:>10}{comparables:>9}{pct:>6}{s['difiere']:>9}{s['faltante']:>8}")
+    ap("")
+
+    # 4. DETALLE DE INCONSISTENCIAS POR PREDIO
+    ap(linea("-"))
+    ap("3. INCONSISTENCIAS DETECTADAS (por predio)")
+    ap(linea("-"))
+    if df_incons.empty:
+        ap("  No se detectaron inconsistencias en los predios cruzados.")
+    else:
+        # Agrupar por NPN para dar contexto por predio
+        for npn, grupo in df_incons.groupby("NPN", sort=False):
+            archivo = grupo.iloc[0]["Archivo_PDF"]
+            ap(f"  NPN: {npn}")
+            ap(f"  Archivo PDF: {archivo}")
+            ap(f"  Campos inconsistentes: {len(grupo)}")
+            for _, r in grupo.iterrows():
+                ap(f"    - {r['Campo']}:")
+                ap(f"        PDF  : {str(r['Valor_PDF'])[:120]}")
+                ap(f"        Base : {str(r['Valor_Base'])[:120]}")
+                ap(f"        Estado: {r['Resultado']}")
+            ap("  " + linea("-")[:W-2])
+    ap("")
+
+    # 5. PREDIOS SIN MATCH
+    ap(linea("-"))
+    ap("4. PREDIOS SIN CORRESPONDENCIA EN LA BASE CATASTRAL")
+    ap(linea("-"))
+    if df_sinmatch.empty:
+        ap("  Todos los predios extraidos cruzaron con la base.")
+    else:
+        ap("  (Posibles causas: error de OCR en digitos del NPN, o predio de")
+        ap("   un municipio/corte distinto al de la base consolidada.)")
+        ap("")
+        ap(f"  {'NPN':<34} Archivo PDF")
+        for _, r in df_sinmatch.iterrows():
+            ap(f"  {str(r['NPN']):<34} {r['Archivo_PDF']}")
+    ap("")
+    ap(linea("="))
+    ap("FIN DEL REPORTE".center(W))
+    ap(linea("="))
+
+    with open(ruta_txt, "w", encoding="utf-8") as f:
+        f.write("\n".join(lineas))
+    return ruta_txt
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compara tabulado PDFs vs base catastral consolidada por NPN.")
     parser.add_argument("--pdf", default=os.path.join(BASE_DIR, "data", "_prueba_100", "structured", "TABULADO_RESULTADOS.xlsx"))
@@ -337,11 +441,19 @@ def main():
         (df_sinmatch if not df_sinmatch.empty else pd.DataFrame({"Mensaje": ["Todos los NPN cruzaron"]})
          ).to_excel(w, sheet_name="NPN_Sin_Match", index=False)
 
+    # Reporte en TEXTO PLANO (.txt) - Objetivo Especifico 4
+    m_corte = re.search(r"(\d{8})", os.path.basename(args.base))
+    corte = m_corte.group(1) if m_corte else "N/D"
+    out_txt = os.path.join(COMP_DIR, f"REPORTE_VALIDACION_{ts}.txt")
+    generar_reporte_txt(out_txt, df_pdf, df_base, df_detalle, df_incons,
+                        df_sinmatch, stats, corte)
+
     logger.info("=" * 60)
     logger.info(f"Comparacion completada.")
     logger.info(f"  Predios PDF: {df_pdf['_NPN'].nunique()} | con match: {len(df_detalle)} | sin match: {len(df_sinmatch)}")
     logger.info(f"  Inconsistencias: {len(df_incons)}")
-    logger.info(f"  Reporte: {out}")
+    logger.info(f"  Reporte Excel: {out}")
+    logger.info(f"  Reporte TXT  : {out_txt}")
     logger.info("=" * 60)
 
 
