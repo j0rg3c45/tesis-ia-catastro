@@ -46,8 +46,14 @@ from functools import partial
 import logging
 import gc
 import shutil
+import sys
 # --- IMPORTACIÓN DE Tesseract OCR ---
 import pytesseract
+
+# --- MODULO DE METRICAS / TELEMETRIA (src/metrics.py) ---
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+from metrics import (MetricasTracker, RegistroMetrica,
+                     construir_registro_extraccion, ESTADO_ERROR, ESTADO_CACHE)
 
 # ==============================================================================
 # CONFIGURACIÓN PRINCIPAL
@@ -565,63 +571,85 @@ try:
 except Exception as e:
     logger.error(f"Error: No se pudo acceder a Tesseract OCR. Verifica la ruta: {e}")
     raise
+CAMPOS_DOCUMENTO = ["RESOLUCIÓN No.", "FechaResolucion"]
+
+
 def process_pdf(file_path, cache_folder, base_folder, output_folder, force_reprocess=False):
+    """
+    Procesa un PDF y devuelve una tupla (filas, registro_metrica):
+      - filas: lista de filas por predio; None si error; [] si sin predios/cache.
+      - registro_metrica: RegistroMetrica con la telemetria del documento
+        (o None cuando el archivo estaba en cache y se salto).
+    """
+    filename = os.path.basename(file_path)
     try:
-        filename = os.path.basename(file_path)
         logger.info(f"\n{'='*60}")
         logger.info(f"PROCESANDO: {filename}")
         logger.info(f"{'='*60}")
-        
+
         if not force_reprocess and is_file_processed(file_path, cache_folder):
             logger.info(f"⚠️ Ya en caché, omitiendo")
-            return None
-        
-        # OCR
+            reg = RegistroMetrica(archivo=filename, estado=ESTADO_CACHE)
+            return [], reg
+
+        # --- OCR (medido) ---
+        t_ocr_ini = time.perf_counter()
         images = pdf_to_images(file_path)
         if not images:
             logger.error(f" No se extrajeron imágenes")
-            return None
-        
-        logger.info(f" {len(images)} páginas")
+            reg = RegistroMetrica(archivo=filename, estado=ESTADO_ERROR,
+                                  error_msg="No se extrajeron imagenes del PDF")
+            return None, reg
+
+        n_paginas = len(images)
+        logger.info(f" {n_paginas} páginas")
         text = ""
         for i, image in enumerate(images):
             page_text = extract_text_from_image(image, i + 1)
             if page_text:
                 text += page_text + "\n"
-        
+        tiempo_ocr = time.perf_counter() - t_ocr_ini
+
         # Guardar TXT
         output_file_path = os.path.join(output_folder, os.path.splitext(filename)[0] + ".txt")
         with open(output_file_path, "w", encoding="utf-8") as f:
             f.write(text)
-        
-        # Extraer datos: una fila por predio (enfoque por bloques)
+
+        # --- Extracción / parsing (medido) ---
         logger.info(f" Extrayendo datos estructurados (una fila por predio)...")
+        t_pars_ini = time.perf_counter()
         predios = extraer_predios_de_texto(text)
+        tiempo_parsing = time.perf_counter() - t_pars_ini
+
+        # Registro de metricas del documento
+        registro = construir_registro_extraccion(
+            archivo=filename, campos_predio=CAMPOS_PREDIO,
+            campos_documento=CAMPOS_DOCUMENTO, predios=predios,
+            n_paginas=n_paginas, tiempo_ocr_s=tiempo_ocr,
+            tiempo_parsing_s=tiempo_parsing)
 
         if not predios:
             logger.warning(f"No se extrajo ningún predio válido de {filename}")
             mark_file_completed(file_path, cache_folder, [])
-            return []
+            return [], registro
 
-        # Construir una fila por predio, en el orden de columnas del Excel.
-        # Columnas: Nombre del archivo + RESOLUCIÓN No. + FechaResolucion + CAMPOS_PREDIO
+        # Construir una fila por predio (orden de columnas del Excel)
         filas = []
         for predio in predios:
             fila = [filename, predio.get("RESOLUCIÓN No.", NR), predio.get("FechaResolucion", NR)]
             fila += [predio.get(campo, NR) for campo in CAMPOS_PREDIO]
             filas.append(fila)
 
-        # Guardar en caché
         mark_file_completed(file_path, cache_folder, filas)
-
         logger.info(f"COMPLETADO: {filename} ({len(filas)} predios extraídos)")
-        return filas
+        return filas, registro
 
     except Exception as e:
         logger.error(f" ERROR en {filename}: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        return None
+        reg = RegistroMetrica(archivo=filename, estado=ESTADO_ERROR, error_msg=str(e)[:200])
+        return None, reg
 
 
 def guardar_workbook(workbook, output_excel, structured_folder_path, max_attempts=3):
@@ -716,6 +744,12 @@ def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_fold
                            base_folder=base_folder_path, output_folder=output_folder_path,
                            force_reprocess=force_reprocess)
 
+    # === TRACKER DE METRICAS / TELEMETRIA ===
+    metricas_dir = os.path.join(BASE_DIR, "data", "reports", "metricas")
+    tracker = MetricasTracker(
+        campos_predio=CAMPOS_PREDIO, campos_documento=CAMPOS_DOCUMENTO,
+        out_dir=metricas_dir, dpi=CONFIG["dpi"], workers=CONFIG["max_workers"])
+
     completed = 0
     errors = 0
     total_predios = 0
@@ -732,14 +766,16 @@ def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_fold
             for future in tqdm(as_completed(futures), total=len(lote), desc=desc):
                 pdf_file = futures[future]
                 try:
-                    # result: lista de filas (una por predio); None = error; [] = sin predios/caché
-                    result = future.result()
-                    if result:
-                        for fila in result:
+                    # process_pdf devuelve (filas, registro_metrica).
+                    # filas: lista por predio; None = error; [] = sin predios/caché.
+                    filas, registro = future.result()
+                    tracker.agregar(registro)
+                    if filas:
+                        for fila in filas:
                             sheet.append(fila)
                             total_predios += 1
                         completed += 1
-                    elif result is None:
+                    elif filas is None:
                         errors += 1
                     else:
                         completed += 1
@@ -767,6 +803,16 @@ def process_pdfs_in_folder(base_folder_path, output_folder_path, structured_fold
         logger.info(f"Textos extraídos guardados en: {output_folder_path}")
     else:
         logger.error("No se pudo realizar el guardado final del Excel.")
+
+    # === FINALIZAR METRICAS (CSV por documento + resumen JSON + TXT) ===
+    try:
+        rutas = tracker.finalizar()
+        logger.info("Metricas de proceso generadas:")
+        logger.info(f"  CSV por documento : {rutas['csv']}")
+        logger.info(f"  Resumen JSON      : {rutas['json']}")
+        logger.info(f"  Resumen TXT       : {rutas['txt']}")
+    except Exception as e:
+        logger.error(f"No se pudieron generar las metricas de proceso: {e}")
 
 
 def clear_cache_for_file(file_path, cache_folder):

@@ -22,6 +22,7 @@ Autor: Proyecto de Tesis - Maestria en IA y Ciencia de Datos
 
 import os
 import re
+import json
 import argparse
 import logging
 from datetime import datetime
@@ -30,6 +31,7 @@ import pandas as pd
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMP_DIR = os.path.join(BASE_DIR, "data", "comparacion")
+METRICAS_DIR = os.path.join(BASE_DIR, "data", "reports", "metricas")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -417,6 +419,76 @@ def generar_reporte_txt(ruta_txt, df_pdf, df_base, df_detalle, df_incons,
     return ruta_txt
 
 
+def generar_metricas_cruce(df_pdf, df_base, df_detalle, df_sinmatch, stats, corte, ts):
+    """
+    Genera la SECCION SEPARADA de metricas del cruce (etapa de contraste):
+    - tasa de cruce por NPN
+    - matriz de concordancia porcentual campo por campo frente a la base
+
+    Se escribe como archivo independiente (JSON + TXT) en data/reports/metricas/,
+    sin mezclarse con el resumen de metricas de extraccion.
+    """
+    os.makedirs(METRICAS_DIR, exist_ok=True)
+    total_pdf = int(df_pdf["_NPN"].nunique())
+    con_match = int(len(df_detalle))
+    tasa = round(con_match / total_pdf, 4) if total_pdf else 0.0
+
+    concordancia = {}
+    for legible, _, _, _ in CAMPOS:
+        s = stats[legible]
+        comparables = s["coincide"] + s["difiere"]
+        concordancia[legible] = {
+            "coincide": s["coincide"],
+            "compara": comparables,
+            "pct_concordancia": round(s["coincide"] / comparables, 4) if comparables else None,
+            "difiere": s["difiere"],
+            "faltante": s["faltante"],
+            "sin_datos": s["sin_datos"],
+        }
+
+    resumen = {
+        "etapa": "contraste_pdf_vs_catastro",
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "corte_base_catastral": corte,
+        "cruce_npn": {
+            "npn_pdf_unicos": total_pdf,
+            "npn_base_unicos": int(df_base["_NPN"].nunique()),
+            "npn_con_match": con_match,
+            "npn_sin_match": int(len(df_sinmatch)),
+            "tasa_cruce": tasa,
+        },
+        "matriz_concordancia_por_campo": concordancia,
+    }
+
+    json_path = os.path.join(METRICAS_DIR, f"metricas_cruce_{ts}.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(resumen, f, ensure_ascii=False, indent=2)
+
+    # Version .txt legible
+    W = 70
+    L = ["=" * W, "METRICAS DEL CRUCE PDF vs BASE CATASTRAL".center(W), "=" * W]
+    L.append(f"Fecha              : {resumen['timestamp']}")
+    L.append(f"Corte catastral    : {corte}")
+    c = resumen["cruce_npn"]
+    L.append(f"NPN de PDF (unicos): {c['npn_pdf_unicos']}")
+    L.append(f"NPN con match      : {c['npn_con_match']}")
+    L.append(f"NPN sin match      : {c['npn_sin_match']}")
+    L.append(f"Tasa de cruce      : {c['tasa_cruce']*100:.1f}%")
+    L.append("")
+    L.append("-" * W)
+    L.append("MATRIZ DE CONCORDANCIA POR CAMPO")
+    L.append("-" * W)
+    L.append(f"  {'Campo':<26}{'Coincide':>9}{'Compara':>9}{'%':>7}")
+    for campo, m in concordancia.items():
+        pct = f"{m['pct_concordancia']*100:.0f}%" if m["pct_concordancia"] is not None else "n/a"
+        L.append(f"  {campo:<26}{m['coincide']:>9}{m['compara']:>9}{pct:>7}")
+    L.append("=" * W)
+    txt_path = os.path.join(METRICAS_DIR, f"metricas_cruce_{ts}.txt")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(L))
+    return json_path, txt_path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compara tabulado PDFs vs base catastral consolidada por NPN.")
     parser.add_argument("--pdf", default=os.path.join(BASE_DIR, "data", "_prueba_100", "structured", "TABULADO_RESULTADOS.xlsx"))
@@ -448,12 +520,17 @@ def main():
     generar_reporte_txt(out_txt, df_pdf, df_base, df_detalle, df_incons,
                         df_sinmatch, stats, corte)
 
+    # Metricas del cruce como SECCION SEPARADA (matriz de concordancia + tasa cruce)
+    m_json, m_txt = generar_metricas_cruce(df_pdf, df_base, df_detalle,
+                                           df_sinmatch, stats, corte, ts)
+
     logger.info("=" * 60)
     logger.info(f"Comparacion completada.")
     logger.info(f"  Predios PDF: {df_pdf['_NPN'].nunique()} | con match: {len(df_detalle)} | sin match: {len(df_sinmatch)}")
     logger.info(f"  Inconsistencias: {len(df_incons)}")
-    logger.info(f"  Reporte Excel: {out}")
-    logger.info(f"  Reporte TXT  : {out_txt}")
+    logger.info(f"  Reporte Excel : {out}")
+    logger.info(f"  Reporte TXT   : {out_txt}")
+    logger.info(f"  Metricas cruce: {m_json}")
     logger.info("=" * 60)
 
 
