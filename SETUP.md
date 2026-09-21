@@ -28,9 +28,10 @@ Drive privado (15 GB gratis, sin limite de tamano por archivo).
 
 Repositorio: `https://github.com/j0rg3c45/tesis-ia-catastro`
 
-- `main.py` — Etapa 1: extraccion OCR + regex por predio (por lotes)
+- `main.py` — Etapa 1: extraccion OCR + regex por predio (por lotes) + telemetria
+- `src/metrics.py` — modulo de auditoria/metricas (telemetria del pipeline)
 - `scripts/consolidar_base_catastral.py` — consolida el corte catastral por NPN
-- `scripts/comparar_pdf_vs_catastro.py` — compara tabulado PDF vs base catastral
+- `scripts/comparar_pdf_vs_catastro.py` — compara tabulado PDF vs base catastral (+ metricas de cruce)
 - `scripts/comparar_bases.py` — comparacion previa por NPN
 - `README.md`, `requirements.txt`, `.gitignore`, este `SETUP.md`
 - `data/contexto_catastral/general_destinacion_economica.txt` — diccionario de destinos (dependencia del pipeline)
@@ -51,6 +52,7 @@ al PC nuevo (o sincronizarlas desde Drive):
 | `data/contexto_catastral/` (PDFs/modelos IGAC) | Diccionario LADM, instructivos | ~18 MB |
 | `data/contexto_tesis/main.tex` | Documento LaTeX de la tesis | minimo |
 | `data/raw_text/` | Textos OCR (opcional, se regeneran) | variable |
+| `data/reports/` | Metricas y reportes generados (se regeneran al correr) | variable |
 
 **Recomendado:** mantener la carpeta `data/` completa en Google Drive y
 sincronizarla con la app "Google Drive para escritorio" en ambos equipos.
@@ -148,6 +150,16 @@ Salidas:
 - `data/comparacion/BASE_CATASTRAL_CONSOLIDADA_<corte>.csv` — base consolidada
 - `data/comparacion/COMPARACION_PDF_VS_CATASTRO_<timestamp>.xlsx` — reporte en Excel (4 hojas)
 - `data/comparacion/REPORTE_VALIDACION_<timestamp>.txt` — reporte de validacion en texto plano (Objetivo 4)
+
+Metricas de auditoria (telemetria), generadas automaticamente en `data/reports/metricas/`:
+- `metricas_proceso_<timestamp>.csv` — una fila por PDF (estado, n_paginas, n_predios,
+  tiempo OCR, tiempo parsing, completitud, campos faltantes). La produce `main.py`.
+- `resumen_metricas_tesis.json` y `resumen_metricas_tesis.txt` — consolidado de la
+  extraccion (totales, tiempos, tasa de deteccion por variable). Los produce `main.py`.
+- `metricas_cruce_<timestamp>.json` y `.txt` — tasa de cruce por NPN y matriz de
+  concordancia por campo. Los produce `scripts/comparar_pdf_vs_catastro.py`.
+
+Nota: la carpeta `data/reports/` esta ignorada por git (contiene datos), no se versiona.
 
 ### Nota para la corrida del lote completo (2.568 PDFs)
 
